@@ -43,7 +43,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist:win -- --config.directories.output=release --publish never
 
-      - name: Create GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -56,4 +56,9 @@ jobs:
           if ($assets.Count -eq 0) {
             throw 'No Windows build assets were found in release'
           }
-          gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --generate-notes
+          $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
+          if ($LASTEXITCODE -eq 0 -and $releaseId) {
+            gh release upload $env:GITHUB_REF_NAME $assets --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --generate-notes
+          }
