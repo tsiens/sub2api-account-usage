@@ -56,9 +56,18 @@ jobs:
           if ($assets.Count -eq 0) {
             throw 'No Windows build assets were found in release'
           }
+          $tagType = git cat-file -t $env:GITHUB_REF_NAME
+          if ($tagType -ne 'tag') {
+            throw "Release tag $env:GITHUB_REF_NAME must be an annotated tag with release notes"
+          }
+          $releaseNotes = (git for-each-ref "refs/tags/$env:GITHUB_REF_NAME" --format='%(contents)' | Out-String).Trim()
+          if (-not $releaseNotes) {
+            throw "Release tag $env:GITHUB_REF_NAME does not contain release notes"
+          }
           $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
           if ($LASTEXITCODE -eq 0 -and $releaseId) {
+            gh release edit $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --notes $releaseNotes
             gh release upload $env:GITHUB_REF_NAME $assets --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --generate-notes
+            gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --notes $releaseNotes
           }
