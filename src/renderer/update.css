@@ -1,9 +1,10 @@
-.update-body { min-height: 100vh; overflow: hidden; }
-.update-shell { min-height: 100vh; padding: 0; background: rgba(16, 19, 23, .94); border: 1px solid rgba(148, 163, 184, .24); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, .48); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+.update-body { height: 100vh; min-height: 0; overflow: hidden; }
+.update-body [hidden] { display: none !important; }
+.update-shell { height: 100vh; min-height: 0; overflow: hidden; padding: 0; background: rgba(16, 19, 23, .86); border: 1px solid rgba(148, 163, 184, .24); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, .48); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
 .update-titlebar { height: 62px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px 0 18px; border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
 .update-titlebar .icon-button { -webkit-app-region: no-drag; }
 .update-titlebar h1 { font-size: 18px; }
-.update-content { padding: 22px 20px 18px; }
+.update-content { max-height: none; overflow: hidden; padding: 22px 20px 18px; }
 .update-message { min-height: 22px; margin: 0; color: var(--text); font-size: 14px; font-weight: 600; }
 .update-version { min-height: 18px; margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 .update-progress-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin-top: 21px; }
