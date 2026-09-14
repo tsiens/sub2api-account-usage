@@ -3,17 +3,16 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const { CancellationToken, CancellationError } = require('builder-util-runtime');
-const { UsageService, DEFAULT_UPDATE_URL, accountDisplayName, formatCountdown, quotaPressure } = require('./core/usage-service');
+const { UsageService, DEFAULT_UPDATE_URL, accountDisplayName, formatCountdown } = require('./core/usage-service');
 
 const APP_ID = 'com.tsiens.sub2api-account-usage';
 const PANEL_SIZE = { width: 440, height: 650 };
 const UPDATE_WINDOW_SIZE = { width: 410, height: 260 };
 const FLOAT_BAR_SIZE = { width: 90, height: 30 };
-const FLOAT_BAR_LIMITS = { minWidth: 90, maxWidth: 420, edgeSnap: 14 };
+const FLOAT_BAR_LIMITS = { edgeSnap: 14 };
 const DEFAULT_CONFIG = { baseUrl: '', updateUrl: DEFAULT_UPDATE_URL, updateInterval: 300, rotationInterval: 5, requestTimeout: 15000, allowInsecureTls: false, showFloatingBar: true, floatAlwaysOnTop: true };
 const UPDATE_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 
@@ -27,7 +26,6 @@ let tray;
 let panel;
 let updateWindow;
 let floatBar;
-let settingsWindow;
 let service;
 let appStore;
 let trayDefaultIcon;
@@ -35,12 +33,17 @@ let refreshTimer;
 let rotationTimer;
 let floatPositionSaveTimer;
 let floatTopTimer;
+let floatColorTimer;
+let floatColorWatcher;
+let floatColorBuffer = '';
+let floatColorRequestPending = false;
+let floatColorRequestTimer;
+let floatColor = 'dark';
 let fullscreenWatcher;
 let fullscreenSuppressed = false;
 let updateCheckTimer;
 let updateDownloadInFlight = false;
 let updateCheckInFlight = false;
-let manualUpdateCheckPending = false;
 let updateCancellationToken;
 let updateDownloadPromise;
 let updateCancellationRequested = false;
@@ -154,7 +157,166 @@ function createFloatBar() {
   });
   setFloatingBarAlwaysOnTop(service ? service.getConfig().floatAlwaysOnTop : true);
   floatBar.loadFile(path.join(__dirname, 'renderer', 'float.html'));
+  floatBar.webContents.on('did-finish-load', () => {
+    if (!floatBar || floatBar.isDestroyed()) return;
+    floatBar.webContents.send('float-color', floatColor);
+    floatBar.webContents.send('state', getPublicState());
+    sampleFloatBackground();
+  });
   floatBar.on('closed', () => { floatBar = undefined; });
+}
+
+function sendFloatColor() {
+  if (floatBar && !floatBar.isDestroyed() && !floatBar.webContents.isLoading()) {
+    floatBar.webContents.send('float-color', floatColor);
+  }
+}
+
+function setFloatColor(next) {
+  if (next !== 'light' && next !== 'dark') return;
+  if (floatColor === next) return;
+  floatColor = next;
+  sendFloatColor();
+}
+
+function startFloatColorWatcher() {
+  if (process.platform !== 'win32' || floatColorWatcher) return;
+  const script = String.raw`
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class Sub2ApiPixelApi {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    public static extern uint GetPixel(IntPtr hdc, int x, int y);
+}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction Stop
+
+while (($line = [Console]::ReadLine()) -ne $null) {
+    try {
+        $parts = $line.Split(',')
+        if ($parts.Length -ne 4) { continue }
+        $x = [int]$parts[0]
+        $y = [int]$parts[1]
+        $width = [int]$parts[2]
+        $height = [int]$parts[3]
+        $points = @(
+            [PSCustomObject]@{ X = $x + [int]($width / 2); Y = $y - 6 },
+            [PSCustomObject]@{ X = $x + [int]($width / 2); Y = $y + $height + 6 },
+            [PSCustomObject]@{ X = $x - 6; Y = $y + [int]($height / 2) },
+            [PSCustomObject]@{ X = $x + $width + 6; Y = $y + [int]($height / 2) },
+            [PSCustomObject]@{ X = $x + 12; Y = $y - 5 },
+            [PSCustomObject]@{ X = $x + $width - 12; Y = $y + $height + 5 }
+        )
+        $dc = [Sub2ApiPixelApi]::GetDC([IntPtr]::Zero)
+        if ($dc -eq [IntPtr]::Zero) { throw 'GetDC failed' }
+        $red = 0
+        $green = 0
+        $blue = 0
+        $count = 0
+        foreach ($point in $points) {
+            $pixel = [Sub2ApiPixelApi]::GetPixel($dc, [int]$point.X, [int]$point.Y)
+            if ($pixel -eq [uint32]::MaxValue) { continue }
+            $red += [int]($pixel -band 0xFF)
+            $green += [int](($pixel -shr 8) -band 0xFF)
+            $blue += [int](($pixel -shr 16) -band 0xFF)
+            $count++
+        }
+        [Sub2ApiPixelApi]::ReleaseDC([IntPtr]::Zero, $dc) | Out-Null
+        if ($count -eq 0) { throw 'No pixels sampled' }
+        [Console]::WriteLine(('{0},{1},{2}' -f ($red / $count), ($green / $count), ($blue / $count)))
+    } catch {
+        [Console]::WriteLine('error')
+    }
+    [Console]::Out.Flush()
+}
+`;
+
+  const watcher = spawn('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  floatColorWatcher = watcher;
+  floatColorBuffer = '';
+  watcher.stdout.on('data', (chunk) => {
+    if (floatColorWatcher !== watcher) return;
+    floatColorBuffer += chunk.toString('utf8');
+    const lines = floatColorBuffer.split(/\r?\n/);
+    floatColorBuffer = lines.pop() || '';
+    for (const line of lines) {
+      clearTimeout(floatColorRequestTimer);
+      floatColorRequestTimer = undefined;
+      floatColorRequestPending = false;
+      const values = line.trim().split(',').map(Number);
+      if (values.length !== 3 || values.some((value) => !Number.isFinite(value))) continue;
+      const luminance = values[0] * 0.299 + values[1] * 0.587 + values[2] * 0.114;
+      setFloatColor(luminance >= 160 ? 'light' : 'dark');
+    }
+  });
+  const clearWatcher = () => {
+    if (floatColorWatcher !== watcher) return;
+    floatColorWatcher = undefined;
+    floatColorBuffer = '';
+    floatColorRequestPending = false;
+    clearTimeout(floatColorRequestTimer);
+    floatColorRequestTimer = undefined;
+  };
+  watcher.on('error', clearWatcher);
+  watcher.on('exit', clearWatcher);
+  watcher.stdin.on('error', clearWatcher);
+}
+
+function stopFloatColorWatcher() {
+  const watcher = floatColorWatcher;
+  floatColorWatcher = undefined;
+  floatColorBuffer = '';
+  floatColorRequestPending = false;
+  clearTimeout(floatColorRequestTimer);
+  floatColorRequestTimer = undefined;
+  if (!watcher) return;
+  watcher.stdin.end();
+  watcher.kill();
+}
+
+function sampleFloatBackground() {
+  if (process.platform !== 'win32' || !floatBar || floatBar.isDestroyed() || !floatBar.isVisible() || floatColorRequestPending) return;
+  startFloatColorWatcher();
+  if (!floatColorWatcher || !floatColorWatcher.stdin.writable) return;
+  const { x, y, width, height } = floatBar.getBounds();
+  floatColorRequestPending = true;
+  floatColorRequestTimer = setTimeout(() => {
+    floatColorRequestPending = false;
+    stopFloatColorWatcher();
+  }, 2000);
+  floatColorWatcher.stdin.write(`${Math.round(x)},${Math.round(y)},${Math.round(width)},${Math.round(height)}\n`, (error) => {
+    if (!error) return;
+    floatColorRequestPending = false;
+    stopFloatColorWatcher();
+  });
+}
+
+function restartFloatColorTimer(enabled) {
+  clearInterval(floatColorTimer);
+  floatColorTimer = undefined;
+  if (!enabled || process.platform !== 'win32') {
+    stopFloatColorWatcher();
+    return;
+  }
+  startFloatColorWatcher();
+  sampleFloatBackground();
+  floatColorTimer = setInterval(sampleFloatBackground, 800);
 }
 
 function positionFloatBar() {
@@ -249,37 +411,27 @@ function clampFloatBounds(x, y, width, height) {
   return { x: nextX, y: nextY };
 }
 
-function resizeFloatBar(requestedWidth) {
-  if (!floatBar || floatBar.isDestroyed()) return;
-  const width = Math.max(
-    FLOAT_BAR_LIMITS.minWidth,
-    Math.min(Math.round(Number(requestedWidth) || FLOAT_BAR_SIZE.width), FLOAT_BAR_LIMITS.maxWidth)
-  );
-  const bounds = floatBar.getBounds();
-  const position = clampFloatBounds(
-    bounds.x + (bounds.width - width) / 2,
-    bounds.y,
-    width,
-    FLOAT_BAR_SIZE.height
-  );
-  floatBar.setBounds({ ...position, width, height: FLOAT_BAR_SIZE.height }, false);
-  scheduleFloatPositionSave(position.x, position.y);
-}
-
 function moveFloatBar(delta = {}) {
   if (!floatBar || floatBar.isDestroyed()) return;
   const dx = Number(delta.dx);
   const dy = Number(delta.dy);
   if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
   const bounds = floatBar.getBounds();
-  const position = clampFloatBounds(bounds.x + dx, bounds.y + dy, bounds.width, bounds.height);
-  floatBar.setPosition(position.x, position.y, false);
+  const position = clampFloatBounds(
+    bounds.x + dx,
+    bounds.y + dy,
+    FLOAT_BAR_SIZE.width,
+    FLOAT_BAR_SIZE.height
+  );
+  floatBar.setBounds({ ...position, width: FLOAT_BAR_SIZE.width, height: FLOAT_BAR_SIZE.height }, false);
   if (service?.getConfig().floatAlwaysOnTop !== false) floatBar.moveTop();
+  sampleFloatBackground();
   scheduleFloatPositionSave(position.x, position.y);
 }
 
 function syncFloatingBar(enabled, alwaysOnTop = service?.getConfig().floatAlwaysOnTop !== false) {
   restartFloatBarTopTimer(enabled && !fullscreenSuppressed && alwaysOnTop);
+  restartFloatColorTimer(enabled && !fullscreenSuppressed);
   if (enabled && !fullscreenSuppressed) {
     createFloatBar();
     setFloatingBarAlwaysOnTop(alwaysOnTop);
@@ -297,6 +449,7 @@ function applyFullscreenSuppression(isFullscreen) {
   fullscreenSuppressed = isFullscreen;
   if (isFullscreen) {
     floatBar?.hide();
+    restartFloatColorTimer(false);
     return;
   }
   if (service) {
@@ -491,7 +644,6 @@ function handleUpdateError(error) {
   quittingForUpdate = false;
   updateCheckInFlight = false;
   updateDownloadInFlight = false;
-  manualUpdateCheckPending = false;
   setUpdateUiState({ status: 'error', message: error.message || String(error), percent: 0 });
   appendLog(`自动更新错误：${error.message || error}`);
 }
@@ -517,7 +669,6 @@ async function cancelUpdate(closeAfter = false) {
   updateDownloadPromise = undefined;
   await clearUpdateCache();
   updateCancellationRequested = false;
-  manualUpdateCheckPending = false;
   updateCancelInFlight = false;
   setUpdateUiState({ status: 'cancelled', message: '已取消，更新缓存已清空。', percent: 0, transferred: 0, total: 0, speed: 0 });
   if (closeAfter) updateWindow?.hide();
@@ -539,9 +690,12 @@ function installDownloadedUpdate() {
 }
 
 function checkForUpdates(manual = false) {
-  if (manual && (updateDownloadInFlight || updateCheckInFlight)) {
-    manualUpdateCheckPending = true;
-    showUpdateWindow(updateUiState);
+  if (updateDownloadInFlight || updateCheckInFlight) {
+    if (manual) {
+      showUpdateWindow(updateCheckInFlight
+        ? { status: 'checking', message: '正在检查更新…' }
+        : updateUiState);
+    }
     return;
   }
   if (manual) {
@@ -556,7 +710,6 @@ function checkForUpdates(manual = false) {
     return;
   }
   updateCheckInFlight = true;
-  manualUpdateCheckPending = manual;
   void autoUpdater.checkForUpdates().catch((error) => {
     handleUpdateError(error);
     appendLog(`更新检查失败：${error.message || error}`);
@@ -616,12 +769,10 @@ function setupAutoUpdater(updateUrl) {
     });
     autoUpdater.on('update-not-available', () => {
       updateCheckInFlight = false;
-      manualUpdateCheckPending = false;
       setUpdateUiState({ status: 'latest', version: autoUpdater.currentVersion?.version || app.getVersion(), percent: 0, message: '当前已是最新版本。' });
     });
     autoUpdater.on('update-downloaded', (info) => {
       updateDownloadInFlight = false;
-      manualUpdateCheckPending = false;
       setUpdateUiState({ status: 'downloaded', version: info?.version || '新版本', percent: 100, transferred: 0, total: 0, speed: 0, message: '更新已下载完成。' });
       showUpdateWindow();
     });
@@ -739,115 +890,6 @@ function updateTrayText() {
   tray.setToolTip(`${accountDisplayName(account)}  ${suffix}`);
 }
 
-function trayColor(pressure) {
-  if (pressure >= 95) return [239, 68, 68];
-  if (pressure >= 80) return [234, 179, 8];
-  return [34, 197, 94];
-}
-
-function createUsageTrayIcon(remaining, color) {
-  const size = 32;
-  const pixels = Buffer.alloc(size * size * 4);
-  const [red, green, blue] = color;
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const edge = Math.min(x, y, size - 1 - x, size - 1 - y);
-      if (edge >= 3 || (edge >= 1 && x > 2 && x < size - 3 && y > 2 && y < size - 3)) {
-        setRgbaPixel(pixels, size, x, y, [15, 23, 42, 255]);
-      }
-    }
-  }
-  for (let y = 2; y < 5; y += 1) {
-    for (let x = 5; x < size - 5; x += 1) setRgbaPixel(pixels, size, x, y, [red, green, blue, 255]);
-  }
-
-  const glyphs = {
-    '0': ['111', '101', '101', '101', '111'],
-    '1': ['010', '110', '010', '010', '111'],
-    '2': ['111', '001', '111', '100', '111'],
-    '3': ['111', '001', '111', '001', '111'],
-    '4': ['101', '101', '111', '001', '001'],
-    '5': ['111', '100', '111', '001', '111'],
-    '6': ['111', '100', '111', '101', '111'],
-    '7': ['111', '001', '010', '010', '010'],
-    '8': ['111', '101', '111', '101', '111'],
-    '9': ['111', '101', '111', '001', '111']
-  };
-  const text = String(Math.max(0, Math.min(100, Math.round(remaining))));
-  const scale = text.length === 3 ? 3 : text.length === 2 ? 4 : 5;
-  const gap = text.length === 1 ? 0 : scale;
-  const width = text.length * 3 * scale + (text.length - 1) * gap;
-  const startX = Math.floor((size - width) / 2);
-  const startY = 9;
-  for (let index = 0; index < text.length; index += 1) {
-    const glyph = glyphs[text[index]];
-    const glyphX = startX + index * (3 * scale + gap);
-    for (let gy = 0; gy < glyph.length; gy += 1) {
-      for (let gx = 0; gx < glyph[gy].length; gx += 1) {
-        if (glyph[gy][gx] !== '1') continue;
-        for (let sy = 0; sy < scale; sy += 1) {
-          for (let sx = 0; sx < scale; sx += 1) {
-            const x = glyphX + gx * scale + sx;
-            const y = startY + gy * scale + sy;
-            if (x < 0 || x >= size || y < 0 || y >= size) continue;
-            setRgbaPixel(pixels, size, x, y, [248, 250, 252, 255]);
-          }
-        }
-      }
-    }
-  }
-  return nativeImage.createFromBuffer(encodePng(size, size, pixels));
-}
-
-function setRgbaPixel(bitmap, size, x, y, color) {
-  const offset = (y * size + x) * 4;
-  bitmap[offset] = color[0];
-  bitmap[offset + 1] = color[1];
-  bitmap[offset + 2] = color[2];
-  bitmap[offset + 3] = color[3];
-}
-
-function encodePng(width, height, pixels) {
-  const scanlines = Buffer.alloc((width * 4 + 1) * height);
-  for (let y = 0; y < height; y += 1) {
-    const sourceStart = y * width * 4;
-    const targetStart = y * (width * 4 + 1);
-    scanlines[targetStart] = 0;
-    pixels.copy(scanlines, targetStart + 1, sourceStart, sourceStart + width * 4);
-  }
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 6;
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    pngChunk('IHDR', header),
-    pngChunk('IDAT', zlib.deflateSync(scanlines)),
-    pngChunk('IEND', Buffer.alloc(0))
-  ]);
-}
-
-function pngChunk(type, data) {
-  const typeBuffer = Buffer.from(type, 'ascii');
-  const payload = Buffer.concat([typeBuffer, data]);
-  const chunk = Buffer.alloc(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0);
-  typeBuffer.copy(chunk, 4);
-  data.copy(chunk, 8);
-  chunk.writeUInt32BE(crc32(payload), 8 + data.length);
-  return chunk;
-}
-
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
 function restartRotation() {
   clearInterval(rotationTimer);
   const interval = service.getConfig().rotationInterval * 1000;
@@ -855,7 +897,6 @@ function restartRotation() {
   rotationTimer = setInterval(() => {
     rotationIndex = (rotationIndex + 1) % state.accounts.length;
     updateTrayText();
-    broadcastState();
   }, interval);
 }
 
@@ -866,10 +907,6 @@ function restartRefreshTimer() {
     if (powerMonitor.getSystemIdleTime() >= intervalSeconds) return;
     void refreshUsage(false);
   }, intervalSeconds * 1000);
-}
-
-function showLogs() {
-  showPanel('settings', 'logs');
 }
 
 function registerIpc() {
@@ -914,9 +951,6 @@ function registerIpc() {
     return getPublicState();
   });
   ipcMain.handle('get-stats', async (_event, accountId) => service.getAccountStats(accountId, 30));
-  ipcMain.on('resize-float', (event, width) => {
-    if (floatBar && event.sender === floatBar.webContents) resizeFloatBar(width);
-  });
   ipcMain.on('move-float', (event, delta = {}) => {
     if (!floatBar || event.sender !== floatBar.webContents) return;
     moveFloatBar(delta);
@@ -963,6 +997,8 @@ else {
     clearInterval(rotationTimer);
     clearInterval(updateCheckTimer);
     clearInterval(floatTopTimer);
+    clearInterval(floatColorTimer);
+    stopFloatColorWatcher();
     updateCheckInFlight = false;
     updateCancellationToken?.cancel();
     clearTimeout(floatPositionSaveTimer);

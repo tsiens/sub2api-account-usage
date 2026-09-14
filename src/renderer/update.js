@@ -24,6 +24,7 @@ function render(state = {}) {
   const speed = Number(state.speed) > 0 ? ` · ${formatBytes(state.speed)}/秒` : '';
   $('updateDetail').textContent = progressVisible && Number(state.total) > 0 ? `${transferred} / ${total}${speed}` : '';
   $('cancelButton').hidden = status !== 'downloading';
+  $('cancelButton').disabled = status !== 'downloading';
   $('installButton').hidden = !downloaded;
   $('closeActionButton').hidden = !closable;
   $('closeActionButton').textContent = downloaded ? '稍后安装' : '关闭';

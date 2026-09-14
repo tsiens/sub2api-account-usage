@@ -76,7 +76,9 @@ function accountCard(result) {
   const account = result.account || {};
   const usage = result.usage || {};
   const name = escapeHtml(account.name || '未命名账户');
-  return `<article class="account-card"><div class="account-head"><button class="account-name account-link" data-account-id="${escapeHtml(account.id)}" data-account-name="${name}"><i class="provider-dot"></i><span>${icons[provider(account)] || provider(account)} ${name}</span></button><span class="updated">更新于 ${escapeHtml(formatTime(usage.updated_at))}</span></div>${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}</article>`;
+  const providerKey = provider(account);
+  const providerLabel = escapeHtml(icons[providerKey] || providerKey);
+  return `<article class="account-card"><div class="account-head"><button class="account-name account-link" data-account-id="${escapeHtml(account.id)}" data-account-name="${name}"><i class="provider-dot"></i><span>${providerLabel} ${name}</span></button><span class="updated">更新于 ${escapeHtml(formatTime(usage.updated_at))}</span></div>${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}</article>`;
 }
 
 function quota(label, item) {

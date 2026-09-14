@@ -20,15 +20,14 @@
   },
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/core/usage-service.js && node --check src/renderer/renderer.js",
-    "dist:win": "electron-builder --win nsis",
-    "dist:portable": "electron-builder --win portable"
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/core/usage-service.js && node --check src/renderer/renderer.js && node --check src/renderer/float.js && node --check src/renderer/update.js",
+    "dist:win": "electron-builder --win nsis"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {
-    "electron": "^38.1.0",
+    "electron": "^44.3.0",
     "electron-builder": "^26.0.12"
   },
   "build": {
@@ -47,7 +46,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "icon.png"
@@ -59,9 +60,6 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Sub2API 账户用量"
-    },
-    "portable": {
-      "artifactName": "Sub2API.${version}.${ext}"
     }
   }
 }

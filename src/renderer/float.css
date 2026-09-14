@@ -1,10 +1,16 @@
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font: 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
-.float-shell { width: 100%; height: 30px; display: flex; align-items: center; padding: 0 6px; border: 1px solid rgba(148, 163, 184, .18); border-radius: 15px; outline: none; background: rgba(16, 19, 23, .3); color: #f1f5f9; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
-.float-shell:hover { border-color: rgba(96, 165, 250, .48); background: rgba(24, 31, 41, .42); }
+.float-shell { width: 90px; height: 30px; display: flex; align-items: center; gap: 0; padding: 0 1px; border: 0; border-radius: 4px; outline: none; appearance: none; background: transparent; color: #fff; cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
+.float-shell.theme-light { color: #000; }
+.float-shell.theme-dark { color: #fff; }
+.float-shell:hover { background: rgba(0, 0, 0, .5); }
+.float-shell.theme-light:hover { background: rgba(255, 255, 255, .5); }
 .float-shell.dragging { cursor: grabbing; }
-.marquee-viewport { width: 100%; height: 30px; overflow: hidden; white-space: nowrap; }
-.marquee-track { display: flex; flex-direction: column; width: 100%; transform: translateY(0); font: inherit; line-height: 1; }
-.marquee-item { width: 100%; height: 30px; min-height: 30px; display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.measure-text { position: absolute; left: -10000px; top: 0; display: inline-block; width: max-content; height: 0; visibility: hidden; white-space: nowrap; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
+.marquee-viewport { display: block; flex: 1 1 auto; min-width: 0; width: 100%; height: 30px; overflow: hidden; white-space: nowrap; }
+.marquee-track { display: flex; flex-direction: column; min-width: 0; width: 100%; transform: translateY(0); font: inherit; line-height: 1; }
+.marquee-item { width: 88px; min-width: 88px; height: 30px; min-height: 30px; display: flex; align-items: center; gap: 0; overflow: hidden; white-space: nowrap; }
+.provider-icon { display: grid; width: 12px; height: 12px; flex: 0 0 12px; place-items: center; font-style: normal; text-align: center; }
+.provider-logo { display: block; width: 12px; height: 12px; filter: invert(1); }
+.float-shell.theme-light .provider-logo { filter: none; }
+.usage-values { width: 76px; flex: 0 0 76px; color: inherit; font: inherit; text-align: right; white-space: nowrap; }

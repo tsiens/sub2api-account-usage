@@ -15,10 +15,10 @@ contextBridge.exposeInMainWorld('sub2api', {
   setApiKey: (value) => ipcRenderer.invoke('set-api-key', value),
   logout: () => ipcRenderer.invoke('logout'),
   getStats: (accountId) => ipcRenderer.invoke('get-stats', accountId),
-  resizeFloat: (width) => ipcRenderer.send('resize-float', width),
   moveFloat: (delta) => ipcRenderer.send('move-float', delta),
   openPanel: () => ipcRenderer.send('open-panel'),
   onState: (callback) => ipcRenderer.on('state', (_event, state) => callback(state)),
+  onFloatColor: (callback) => ipcRenderer.on('float-color', (_event, color) => callback(color)),
   onNavigate: (callback) => ipcRenderer.on('navigate', (_event, payload) => callback(payload)),
   close: () => ipcRenderer.send('close-panel')
 });
