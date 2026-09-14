@@ -50,9 +50,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $assets = @(Get-ChildItem -LiteralPath 'release', 'release-portable' -File -ErrorAction SilentlyContinue | Where-Object {
-            $_.Extension -in @('.exe', '.blockmap')
-          } | ForEach-Object { $_.FullName })
+          $assets = @(
+            Get-ChildItem -LiteralPath 'release' -File -ErrorAction SilentlyContinue | Where-Object {
+              $_.Extension -in @('.exe', '.blockmap', '.yml')
+            } | ForEach-Object { $_.FullName }
+            Get-ChildItem -LiteralPath 'release-portable' -File -ErrorAction SilentlyContinue | Where-Object {
+              $_.Extension -eq '.exe'
+            } | ForEach-Object { $_.FullName }
+          )
           if ($assets.Count -eq 0) {
             throw 'No Windows build assets were found in release'
           }

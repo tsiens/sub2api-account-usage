@@ -5,6 +5,7 @@ const https = require('https');
 
 const DISPLAY_TIMEZONE = 'Asia/Shanghai';
 const ACCOUNT_PAGE_SIZE = 100;
+const DEFAULT_UPDATE_URL = 'https://github.com/tsiens/sub2api-account-usage';
 
 const PROVIDER_ICONS = Object.freeze({
   openai: 'openai',
@@ -31,6 +32,8 @@ class UsageService {
 
   getConfig() {
     const saved = this.store.getConfig();
+    let updateUrl = DEFAULT_UPDATE_URL;
+    try { updateUrl = normalizeUpdateUrl(saved.updateUrl); } catch { /* Use the built-in update source. */ }
     return {
       baseUrl: String(saved.baseUrl || '').trim().replace(/\/+$/, ''),
       updateInterval: Math.max(30, Number(saved.updateInterval) || 300),
@@ -38,7 +41,8 @@ class UsageService {
       requestTimeout: Math.max(1000, Number(saved.requestTimeout) || 15000),
       allowInsecureTls: Boolean(saved.allowInsecureTls),
       showFloatingBar: saved.showFloatingBar !== false,
-      floatAlwaysOnTop: saved.floatAlwaysOnTop !== false
+      floatAlwaysOnTop: saved.floatAlwaysOnTop !== false,
+      updateUrl
     };
   }
 
@@ -73,6 +77,7 @@ class UsageService {
     next.allowInsecureTls = Boolean(next.allowInsecureTls);
     next.showFloatingBar = next.showFloatingBar !== false;
     next.floatAlwaysOnTop = next.floatAlwaysOnTop !== false;
+    next.updateUrl = normalizeUpdateUrl(next.updateUrl);
     this.store.setConfig(next);
     return this.getConfig();
   }
@@ -454,8 +459,21 @@ function finiteNonNegative(value) {
   return Number.isFinite(number) ? Math.max(0, number) : 0;
 }
 
+function normalizeUpdateUrl(value) {
+  const raw = String(value || '').trim() || DEFAULT_UPDATE_URL;
+  const parsed = new URL(raw);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('更新地址只支持 http 或 https。');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('更新地址不能包含账号、密码、查询参数或片段。');
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
 module.exports = {
   UsageService,
+  DEFAULT_UPDATE_URL,
   accountDisplayName,
   clampPct: (value) => {
     const number = Number(value);

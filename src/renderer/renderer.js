@@ -94,6 +94,7 @@ function formatTime(value) {
 
 function fillConfig(config) {
   $('baseUrl').value = config.baseUrl || '';
+  $('updateUrl').value = config.updateUrl || '';
   $('updateInterval').value = config.updateInterval ?? 300;
   $('rotationInterval').value = config.rotationInterval ?? 5;
   $('requestTimeout').value = config.requestTimeout ?? 15000;
@@ -145,7 +146,7 @@ async function openStats(accountId, accountName) {
 async function saveConfig(event) {
   event.preventDefault();
   try {
-    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateInterval: $('updateInterval').value, rotationInterval: $('rotationInterval').value, requestTimeout: $('requestTimeout').value, allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
+    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: $('updateInterval').value, rotationInterval: $('rotationInterval').value, requestTimeout: $('requestTimeout').value, allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
     toast('连接设置已保存');
   } catch (error) { toast(error.message || '保存失败'); }
 }

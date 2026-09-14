@@ -2,7 +2,7 @@
   "name": "sub2api-account-usage",
   "displayName": "Sub2API 账户用量",
   "description": "Windows 11 系统托盘中的 Sub2API 账户用量监控工具。",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "src/main.js",
   "author": "tsiens",
   "license": "MIT",
@@ -23,6 +23,9 @@
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/core/usage-service.js && node --check src/renderer/renderer.js",
     "dist:win": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron": "^38.1.0",

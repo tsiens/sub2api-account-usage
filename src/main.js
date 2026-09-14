@@ -1,16 +1,19 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, ipcMain, nativeImage, screen, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
-const { UsageService, accountDisplayName, formatCountdown, quotaPressure } = require('./core/usage-service');
+const { spawn } = require('child_process');
+const { autoUpdater } = require('electron-updater');
+const { UsageService, DEFAULT_UPDATE_URL, accountDisplayName, formatCountdown, quotaPressure } = require('./core/usage-service');
 
 const APP_ID = 'com.tsiens.sub2api-account-usage';
 const PANEL_SIZE = { width: 440, height: 650 };
 const FLOAT_BAR_SIZE = { width: 90, height: 30 };
 const FLOAT_BAR_LIMITS = { minWidth: 90, maxWidth: 420, edgeSnap: 14 };
-const DEFAULT_CONFIG = { baseUrl: '', updateInterval: 300, rotationInterval: 5, requestTimeout: 15000, allowInsecureTls: false, showFloatingBar: true, floatAlwaysOnTop: true };
+const DEFAULT_CONFIG = { baseUrl: '', updateUrl: DEFAULT_UPDATE_URL, updateInterval: 300, rotationInterval: 5, requestTimeout: 15000, allowInsecureTls: false, showFloatingBar: true, floatAlwaysOnTop: true };
+const UPDATE_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 
 function normalizeFloatPosition(value) {
   const x = Number(value?.x);
@@ -28,6 +31,12 @@ let trayDefaultIcon;
 let refreshTimer;
 let rotationTimer;
 let floatPositionSaveTimer;
+let fullscreenWatcher;
+let fullscreenSuppressed = false;
+let updateCheckTimer;
+let updateDownloadInFlight = false;
+let configuredUpdateUrl = '';
+let autoUpdaterInitialized = false;
 let state = { status: 'needs-server', accounts: [], failed: [], message: '请配置 Sub2API 服务器地址。', refreshedAt: null };
 let rotationIndex = 0;
 
@@ -175,7 +184,8 @@ function clampFloatBounds(x, y, width, height) {
     x: Math.round(x + width / 2),
     y: Math.round(y + height / 2)
   });
-  const area = display.workArea;
+  // Use the full display bounds so the bar can be placed in front of the taskbar.
+  const area = display.bounds;
   const maxX = Math.max(area.x, area.x + area.width - width);
   const maxY = Math.max(area.y, area.y + area.height - height);
   let nextX = Math.max(area.x, Math.min(Math.round(x), maxX));
@@ -216,7 +226,7 @@ function moveFloatBar(delta = {}) {
 }
 
 function syncFloatingBar(enabled, alwaysOnTop = service?.getConfig().floatAlwaysOnTop !== false) {
-  if (enabled) {
+  if (enabled && !fullscreenSuppressed) {
     createFloatBar();
     setFloatingBarAlwaysOnTop(alwaysOnTop);
     positionFloatBar();
@@ -225,6 +235,185 @@ function syncFloatingBar(enabled, alwaysOnTop = service?.getConfig().floatAlways
   } else if (floatBar) {
     floatBar.hide();
   }
+}
+
+function applyFullscreenSuppression(isFullscreen) {
+  if (fullscreenSuppressed === isFullscreen) return;
+  fullscreenSuppressed = isFullscreen;
+  if (isFullscreen) {
+    floatBar?.hide();
+    return;
+  }
+  if (service) {
+    const config = service.getConfig();
+    syncFloatingBar(config.showFloatingBar, config.floatAlwaysOnTop);
+  }
+}
+
+function startFullscreenWatcher() {
+  if (process.platform !== 'win32' || fullscreenWatcher) return;
+
+  const script = String.raw`
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class Sub2ApiWindowApi {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO {
+        public int CbSize;
+        public RECT RcMonitor;
+        public RECT RcWork;
+        public uint DwFlags;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO monitorInfo);
+}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction Stop
+
+while ($true) {
+    $window = [Sub2ApiWindowApi]::GetForegroundWindow()
+    $isFullscreen = $false
+    if ($window -ne [IntPtr]::Zero) {
+        $windowRect = New-Object Sub2ApiWindowApi+RECT
+        $monitor = [Sub2ApiWindowApi]::MonitorFromWindow($window, 2)
+        $monitorInfo = New-Object Sub2ApiWindowApi+MONITORINFO
+        $monitorInfo.CbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitorInfo)
+        if ($monitor -ne [IntPtr]::Zero -and [Sub2ApiWindowApi]::GetWindowRect($window, [ref]$windowRect) -and [Sub2ApiWindowApi]::GetMonitorInfo($monitor, [ref]$monitorInfo)) {
+            $monitorRect = $monitorInfo.RcMonitor
+            $isFullscreen = $windowRect.Left -eq $monitorRect.Left -and
+                $windowRect.Top -eq $monitorRect.Top -and
+                $windowRect.Right -eq $monitorRect.Right -and
+                $windowRect.Bottom -eq $monitorRect.Bottom
+        }
+    }
+    if ($isFullscreen) { [Console]::WriteLine('1') } else { [Console]::WriteLine('0') }
+    [Console]::Out.Flush()
+    Start-Sleep -Milliseconds 600
+}
+`;
+
+  fullscreenWatcher = spawn('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+
+  let buffer = '';
+  fullscreenWatcher.stdout.on('data', (chunk) => {
+    buffer += chunk.toString('utf8');
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line === '1') applyFullscreenSuppression(true);
+      if (line === '0') applyFullscreenSuppression(false);
+    }
+  });
+  fullscreenWatcher.on('error', () => { fullscreenWatcher = undefined; });
+  fullscreenWatcher.on('exit', () => { fullscreenWatcher = undefined; });
+}
+
+function stopFullscreenWatcher() {
+  if (!fullscreenWatcher) return;
+  fullscreenWatcher.kill();
+  fullscreenWatcher = undefined;
+}
+
+function updateFeedFromUrl(value) {
+  const parsed = new URL(String(value || DEFAULT_UPDATE_URL));
+  const github = parsed.hostname.toLowerCase() === 'github.com'
+    ? parsed.pathname.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/)
+    : null;
+  if (github) return { provider: 'github', owner: github[1], repo: github[2], private: false };
+  return { provider: 'generic', url: `${parsed.toString().replace(/\/+$/, '')}/` };
+}
+
+function checkForUpdates() {
+  if (!app.isPackaged || !configuredUpdateUrl || updateDownloadInFlight) return;
+  void autoUpdater.checkForUpdates().catch((error) => {
+    appendLog(`更新检查失败：${error.message || error}`);
+  });
+}
+
+function configureAutoUpdater(updateUrl) {
+  if (!app.isPackaged) return;
+  const nextUrl = String(updateUrl || DEFAULT_UPDATE_URL).trim();
+  if (nextUrl === configuredUpdateUrl) return;
+  try {
+    autoUpdater.setFeedURL(updateFeedFromUrl(nextUrl));
+    configuredUpdateUrl = nextUrl;
+    checkForUpdates();
+  } catch (error) {
+    appendLog(`更新地址无效：${error.message || error}`);
+  }
+}
+
+function setupAutoUpdater(updateUrl) {
+  if (!app.isPackaged) return;
+  if (!autoUpdaterInitialized) {
+    autoUpdaterInitialized = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.logger = {
+      info: (...args) => appendLog(`[更新] ${args.join(' ')}`),
+      warn: (...args) => appendLog(`[更新] ${args.join(' ')}`),
+      error: (...args) => appendLog(`[更新] ${args.join(' ')}`)
+    };
+    autoUpdater.on('update-available', (info) => {
+      if (updateDownloadInFlight) return;
+      updateDownloadInFlight = true;
+      appendLog(`发现新版本 ${info?.version || '未知'}，开始自动下载。`);
+      void autoUpdater.downloadUpdate().catch((error) => {
+        updateDownloadInFlight = false;
+        appendLog(`更新下载失败：${error.message || error}`);
+      });
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      updateDownloadInFlight = false;
+      const version = info?.version || '新版本';
+      void dialog.showMessageBox({
+        type: 'info',
+        title: 'Sub2API 有新版本',
+        message: `版本 ${version} 已下载完成。`,
+        detail: '现在重启并安装更新，还是稍后安装？',
+        buttons: ['立即重启', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true
+      }).then(({ response }) => {
+        if (response === 0) autoUpdater.quitAndInstall();
+      }).catch((error) => appendLog(`更新确认窗口失败：${error.message || error}`));
+    });
+    autoUpdater.on('error', (error) => {
+      updateDownloadInFlight = false;
+      appendLog(`自动更新错误：${error.message || error}`);
+    });
+    updateCheckTimer = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL);
+  }
+  configureAutoUpdater(updateUrl);
 }
 
 function createTray() {
@@ -470,6 +659,7 @@ function registerIpc() {
   ipcMain.handle('refresh', () => refreshUsage(true));
   ipcMain.handle('save-config', async (_event, values) => {
     const config = await service.setConfig(values);
+    setupAutoUpdater(config.updateUrl);
     restartRefreshTimer();
     restartRotation();
     syncFloatingBar(config.showFloatingBar, config.floatAlwaysOnTop);
@@ -523,6 +713,8 @@ async function initialize() {
   createTray();
   state.authMode = await service.getAuthMode();
   const config = service.getConfig();
+  startFullscreenWatcher();
+  setupAutoUpdater(config.updateUrl);
   syncFloatingBar(config.showFloatingBar, config.floatAlwaysOnTop);
   restartRefreshTimer();
   if (!app.isPackaged) showPanel('dashboard');
@@ -545,7 +737,9 @@ else {
   app.on('before-quit', () => {
     clearInterval(refreshTimer);
     clearInterval(rotationTimer);
+    clearInterval(updateCheckTimer);
     clearTimeout(floatPositionSaveTimer);
+    stopFullscreenWatcher();
     if (floatBar && !floatBar.isDestroyed()) {
       const [x, y] = floatBar.getPosition();
       appStore?.setFloatPosition({ x, y });
