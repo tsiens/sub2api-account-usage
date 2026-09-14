@@ -473,12 +473,12 @@ function setupAutoUpdater(updateUrl) {
     };
     autoUpdater.on('update-available', (info) => {
       updateCheckInFlight = false;
-      manualUpdateCheckPending = false;
       if (updateDownloadInFlight) return;
       updateDownloadInFlight = true;
       appendLog(`发现新版本 ${info?.version || '未知'}，开始自动下载。`);
       void autoUpdater.downloadUpdate().catch((error) => {
         updateDownloadInFlight = false;
+        finishManualUpdateCheck('更新下载失败。', error.message || String(error), 'error');
         appendLog(`更新下载失败：${error.message || error}`);
       });
     });

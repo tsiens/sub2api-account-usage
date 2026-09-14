@@ -53,11 +53,15 @@
       "icon": "icon.png"
     },
     "nsis": {
+      "artifactName": "Sub2API.Setup.${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Sub2API 账户用量"
+    },
+    "portable": {
+      "artifactName": "Sub2API.${version}.${ext}"
     }
   }
 }
