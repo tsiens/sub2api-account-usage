@@ -7,6 +7,8 @@ let dragState;
 let suppressClick = false;
 let rotationTimer;
 let rotationIndex = 0;
+let measuredValuesKey = '';
+let pendingWidth;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -31,9 +33,17 @@ function render(state) {
   track.style.transform = 'translateY(0)';
   const slides = values.length > 1 ? [...values, values[0]] : values;
   track.innerHTML = slides.map((value, index) => `<span class="marquee-item"${index === values.length ? ' aria-hidden="true"' : ''}>${escapeHtml(value)}</span>`).join('');
-  measureText.textContent = values.reduce((longest, value) => value.length > longest.length ? value : longest, '');
-  // Include shell padding, borders, and a small font-rendering safety margin.
-  window.sub2api.resizeFloat(Math.ceil(measureText.getBoundingClientRect().width) + 20);
+  const valuesKey = values.join('\u0000');
+  if (valuesKey !== measuredValuesKey) {
+    measuredValuesKey = valuesKey;
+    measureText.textContent = values.reduce((longest, value) => value.length > longest.length ? value : longest, '');
+    // Include shell padding, borders, and a small font-rendering safety margin.
+    pendingWidth = Math.ceil(measureText.getBoundingClientRect().width) + 20;
+    if (!dragState) {
+      window.sub2api.resizeFloat(pendingWidth);
+      pendingWidth = undefined;
+    }
+  }
   if (values.length > 1) rotationTimer = setInterval(advanceAccount, 2800);
 }
 
@@ -84,6 +94,10 @@ function finishDrag(event) {
   shell.classList.remove('dragging');
   shell.releasePointerCapture?.(dragState.pointerId);
   dragState = undefined;
+  if (pendingWidth) {
+    window.sub2api.resizeFloat(pendingWidth);
+    pendingWidth = undefined;
+  }
 }
 
 shell.addEventListener('pointerup', finishDrag);

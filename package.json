@@ -2,7 +2,7 @@
   "name": "sub2api-account-usage",
   "displayName": "Sub2API 账户用量",
   "description": "Windows 11 系统托盘中的 Sub2API 账户用量监控工具。",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "main": "src/main.js",
   "author": "tsiens",
   "license": "MIT",
