@@ -2,6 +2,9 @@
 
 Windows 11 系统托盘中的 Sub2API 管理员账户用量监控工具。
 
+<p align="center"><img src="image/README/float-bar.png" alt="半透明悬浮条"></p>
+<p align="center"><img src="image/README/usage-panel.png" alt="账户用量面板"></p>
+
 ## 功能
 
 - 使用官方图标常驻系统托盘，悬停可查看当前账户用量。
@@ -40,7 +43,8 @@ Windows 11 系统托盘中的 Sub2API 管理员账户用量监控工具。
 ## 自动更新
 
 - 默认从 `https://github.com/tsiens/sub2api-account-usage` 检查新版本。
-- 可以在设置中替换为其他 GitHub 仓库地址，或包含 `latest.yml` 的更新地址。
+- 可以在设置中替换为其他 GitHub 仓库地址、`ghproxy` 前缀地址（例如 `https://ghproxy.net/https://github.com/owner/repo`），或包含 `latest.yml` 的更新地址。
+- 托盘图标右键菜单提供“检查更新”，可随时手动检查新版本。
 - 程序启动时和运行期间会自动检查更新。
 - 发现新版本后自动下载，下载完成后可选择立即重启安装或稍后安装。
 

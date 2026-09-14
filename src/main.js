@@ -35,6 +35,8 @@ let fullscreenWatcher;
 let fullscreenSuppressed = false;
 let updateCheckTimer;
 let updateDownloadInFlight = false;
+let updateCheckInFlight = false;
+let manualUpdateCheckPending = false;
 let configuredUpdateUrl = '';
 let autoUpdaterInitialized = false;
 let state = { status: 'needs-server', accounts: [], failed: [], message: '请配置 Sub2API 服务器地址。', refreshedAt: null };
@@ -343,7 +345,13 @@ function stopFullscreenWatcher() {
 }
 
 function updateFeedFromUrl(value) {
-  const parsed = new URL(String(value || DEFAULT_UPDATE_URL));
+  const raw = String(value || DEFAULT_UPDATE_URL).trim();
+  const proxy = raw.match(/^(https?:\/\/[^/]+\/)https?:\/\/github\.com\/([^/]+)\/([^/?#]+?)(?:\.git)?\/?$/i);
+  if (proxy) {
+    const repository = `https://github.com/${proxy[2]}/${proxy[3].replace(/\.git$/i, '')}`;
+    return { provider: 'generic', url: `${proxy[1]}${repository}/releases/latest/download/` };
+  }
+  const parsed = new URL(raw);
   const github = parsed.hostname.toLowerCase() === 'github.com'
     ? parsed.pathname.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/)
     : null;
@@ -351,9 +359,38 @@ function updateFeedFromUrl(value) {
   return { provider: 'generic', url: `${parsed.toString().replace(/\/+$/, '')}/` };
 }
 
-function checkForUpdates() {
-  if (!app.isPackaged || !configuredUpdateUrl || updateDownloadInFlight) return;
+function finishManualUpdateCheck(message, detail = '', type = 'info') {
+  if (!manualUpdateCheckPending) return;
+  manualUpdateCheckPending = false;
+  void dialog.showMessageBox({
+    type,
+    title: '检查更新',
+    message,
+    detail,
+    buttons: ['确定'],
+    noLink: true
+  }).catch((error) => appendLog(`更新提示窗口失败：${error.message || error}`));
+}
+
+function checkForUpdates(manual = false) {
+  if (!app.isPackaged) {
+    if (manual) {
+      void dialog.showMessageBox({ title: '检查更新', message: '开发模式不检查更新。', buttons: ['确定'], noLink: true });
+    }
+    return;
+  }
+  if (!configuredUpdateUrl || updateDownloadInFlight || updateCheckInFlight) {
+    if (manual) {
+      const message = updateDownloadInFlight ? '更新正在下载中，请稍候。' : '更新检查正在进行中，请稍候。';
+      void dialog.showMessageBox({ title: '检查更新', message, buttons: ['确定'], noLink: true });
+    }
+    return;
+  }
+  updateCheckInFlight = true;
+  manualUpdateCheckPending = manual;
   void autoUpdater.checkForUpdates().catch((error) => {
+    updateCheckInFlight = false;
+    finishManualUpdateCheck('检查更新失败。', error.message || String(error), 'error');
     appendLog(`更新检查失败：${error.message || error}`);
   });
 }
@@ -383,6 +420,8 @@ function setupAutoUpdater(updateUrl) {
       error: (...args) => appendLog(`[更新] ${args.join(' ')}`)
     };
     autoUpdater.on('update-available', (info) => {
+      updateCheckInFlight = false;
+      manualUpdateCheckPending = false;
       if (updateDownloadInFlight) return;
       updateDownloadInFlight = true;
       appendLog(`发现新版本 ${info?.version || '未知'}，开始自动下载。`);
@@ -390,6 +429,10 @@ function setupAutoUpdater(updateUrl) {
         updateDownloadInFlight = false;
         appendLog(`更新下载失败：${error.message || error}`);
       });
+    });
+    autoUpdater.on('update-not-available', () => {
+      updateCheckInFlight = false;
+      finishManualUpdateCheck('当前已是最新版本。');
     });
     autoUpdater.on('update-downloaded', (info) => {
       updateDownloadInFlight = false;
@@ -408,7 +451,9 @@ function setupAutoUpdater(updateUrl) {
       }).catch((error) => appendLog(`更新确认窗口失败：${error.message || error}`));
     });
     autoUpdater.on('error', (error) => {
+      updateCheckInFlight = false;
       updateDownloadInFlight = false;
+      finishManualUpdateCheck('更新失败。', error.message || String(error), 'error');
       appendLog(`自动更新错误：${error.message || error}`);
     });
     updateCheckTimer = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL);
@@ -430,6 +475,7 @@ function updateTrayMenu() {
   const alwaysOnTop = service?.getConfig().floatAlwaysOnTop !== false;
   const menu = Menu.buildFromTemplate([
     { label: '设置', click: () => showPanel('settings') },
+    { label: '检查更新', click: () => checkForUpdates(true) },
     {
       label: '悬浮条置顶',
       type: 'checkbox',
@@ -738,6 +784,7 @@ else {
     clearInterval(refreshTimer);
     clearInterval(rotationTimer);
     clearInterval(updateCheckTimer);
+    updateCheckInFlight = false;
     clearTimeout(floatPositionSaveTimer);
     stopFullscreenWatcher();
     if (floatBar && !floatBar.isDestroyed()) {

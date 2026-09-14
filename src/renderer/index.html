@@ -31,7 +31,7 @@
         <div class="section-heading"><div><span class="eyebrow">应用设置</span><h2>连接与刷新</h2></div></div>
         <form id="configForm" class="form-stack">
           <label>服务器地址<input id="baseUrl" type="url" placeholder="https://sub2api.example.com" autocomplete="url"><small>填写服务根地址，不要追加 /api/v1。</small></label>
-          <label>更新地址<input id="updateUrl" type="url" placeholder="https://github.com/tsiens/sub2api-account-usage" autocomplete="url"><small>填写 GitHub 仓库地址，或包含 latest.yml 的更新目录。</small></label>
+          <label>更新地址<input id="updateUrl" type="url" placeholder="https://github.com/tsiens/sub2api-account-usage" autocomplete="url"><small>支持 GitHub 仓库、ghproxy 前缀，或包含 latest.yml 的更新目录。</small></label>
           <div class="form-grid"><label>自动刷新（秒）<input id="updateInterval" type="number" min="30" step="1"></label><label>账户切换（秒）<input id="rotationInterval" type="number" min="1" step="1"></label></div>
           <div class="form-grid"><label>请求超时（毫秒）<input id="requestTimeout" type="number" min="1000" step="100"></label><label class="checkbox-label"><input id="allowInsecureTls" type="checkbox"><span>允许无效 TLS 证书</span></label></div>
           <label class="checkbox-label"><input id="showFloatingBar" type="checkbox"><span>常驻显示置顶半透明悬浮条</span></label>
