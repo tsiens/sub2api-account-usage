@@ -45,6 +45,7 @@ let updateCancellationToken;
 let updateDownloadPromise;
 let updateCancellationRequested = false;
 let updateCancelInFlight = false;
+let quittingForUpdate = false;
 let configuredUpdateUrl = '';
 let autoUpdaterInitialized = false;
 let updateUiState = { status: 'idle', version: '', percent: 0, transferred: 0, total: 0, speed: 0, message: '' };
@@ -487,6 +488,7 @@ async function clearUpdateCache() {
 
 function handleUpdateError(error) {
   if (updateCancellationRequested || error instanceof CancellationError || error?.message === 'cancelled') return;
+  quittingForUpdate = false;
   updateCheckInFlight = false;
   updateDownloadInFlight = false;
   manualUpdateCheckPending = false;
@@ -530,7 +532,10 @@ function closeUpdateWindow() {
 }
 
 function installDownloadedUpdate() {
-  if (updateUiState.status === 'downloaded') autoUpdater.quitAndInstall();
+  if (updateUiState.status !== 'downloaded') return false;
+  quittingForUpdate = true;
+  autoUpdater.quitAndInstall();
+  return true;
 }
 
 function checkForUpdates(manual = false) {
@@ -950,7 +955,9 @@ if (!gotLock) app.quit();
 else {
   app.on('second-instance', () => showPanel('dashboard'));
   app.whenReady().then(initialize);
-  app.on('window-all-closed', (event) => event.preventDefault());
+  app.on('window-all-closed', (event) => {
+    if (!quittingForUpdate) event.preventDefault();
+  });
   app.on('before-quit', () => {
     clearInterval(refreshTimer);
     clearInterval(rotationTimer);
