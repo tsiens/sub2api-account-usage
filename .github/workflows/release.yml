@@ -64,6 +64,8 @@ jobs:
           if (-not $releaseNotes) {
             throw "Release tag $env:GITHUB_REF_NAME does not contain release notes"
           }
+          $releaseNotes = [regex]::Replace($releaseNotes, '^\s*发布\s+v[^\r\n]+\s*(?:\r?\n)+', '')
+          $releaseNotes = [regex]::Replace($releaseNotes, '(?m)^变更：[ \t]*\r?$', "## 变更`n")
           $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
           if ($LASTEXITCODE -eq 0 -and $releaseId) {
             gh release edit $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --notes $releaseNotes
