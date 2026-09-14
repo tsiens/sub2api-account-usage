@@ -1,0 +1,17 @@
+# Dependencies / tooling
+node_modules/
+release/
+release-*/
+dist/
+
+# VS Code extension packages
+*.vsix
+*.zip
+
+# Logs / temp
+*.log
+.DS_Store
+Thumbs.db
+
+# Local editor state
+.vscode-test/

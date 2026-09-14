@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sub2API 账户用量</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="window-shell" id="panelRoot">
+    <header class="titlebar">
+      <div class="brand"><span class="brand-mark">S</span><div><strong>Sub2API</strong><small>账户用量</small></div></div>
+      <div class="title-actions"><button class="icon-button" id="refreshButton" title="立即刷新" aria-label="立即刷新">↻</button><button class="icon-button" id="closeButton" title="隐藏面板" aria-label="隐藏面板">×</button></div>
+    </header>
+
+    <nav class="tabs" aria-label="页面导航">
+      <button class="tab active" data-view="dashboard">用量</button>
+      <button class="tab" data-view="settings">设置</button>
+    </nav>
+
+    <main>
+      <section id="dashboardView" class="view active">
+        <div class="summary-row"><div><span class="eyebrow">当前状态</span><h1 id="statusTitle">准备中</h1></div><span class="status-dot" id="statusDot"></span></div>
+        <div class="notice" id="notice" hidden></div>
+        <div class="account-list" id="accountList"></div>
+        <div class="empty-state" id="emptyState" hidden><div class="empty-icon">○</div><strong id="emptyTitle">暂无账户用量</strong><p id="emptyMessage">请在设置中配置服务器和管理员鉴权。</p><button class="primary-button" id="emptySettingsButton">打开设置</button></div>
+        <footer class="dashboard-footer"><span id="lastUpdated">尚未刷新</span><button class="text-button" id="settingsShortcut">管理设置</button></footer>
+      </section>
+
+      <section id="settingsView" class="view">
+        <div class="section-heading"><div><span class="eyebrow">应用设置</span><h2>连接与刷新</h2></div></div>
+        <form id="configForm" class="form-stack">
+          <label>服务器地址<input id="baseUrl" type="url" placeholder="https://sub2api.example.com" autocomplete="url"><small>填写服务根地址，不要追加 /api/v1。</small></label>
+          <div class="form-grid"><label>自动刷新（秒）<input id="updateInterval" type="number" min="30" step="1"></label><label>账户切换（秒）<input id="rotationInterval" type="number" min="1" step="1"></label></div>
+          <div class="form-grid"><label>请求超时（毫秒）<input id="requestTimeout" type="number" min="1000" step="100"></label><label class="checkbox-label"><input id="allowInsecureTls" type="checkbox"><span>允许无效 TLS 证书</span></label></div>
+          <label class="checkbox-label"><input id="showFloatingBar" type="checkbox"><span>常驻显示置顶半透明悬浮条</span></label>
+          <button class="primary-button" type="submit">保存连接设置</button>
+        </form>
+
+        <div class="settings-section"><div class="section-label"><span>管理员鉴权</span><span class="auth-badge" id="authMode">未配置</span></div>
+          <form id="apiKeyForm" class="inline-form"><input id="apiKey" type="password" placeholder="Admin API Key"><button class="secondary-button" type="submit">保存并验证</button></form>
+          <div class="divider"><span>或使用管理员登录</span></div>
+          <form id="loginForm" class="form-stack compact"><input id="email" type="email" placeholder="管理员邮箱" autocomplete="username"><input id="password" type="password" placeholder="管理员密码" autocomplete="current-password"><button class="secondary-button" type="submit">登录</button></form>
+          <div id="totpBox" class="form-stack compact" hidden><input id="totpCode" inputmode="numeric" maxlength="6" placeholder="6 位 TOTP 验证码"><button class="secondary-button" id="totpButton">完成两步验证</button></div>
+          <button class="danger-button" id="logoutButton" type="button">清除本地鉴权</button>
+        </div>
+        <div class="settings-section logs-section"><div class="section-label"><span>本地日志</span></div><p>日志文件位于应用数据目录中的 <code>app.log</code>。</p></div>
+      </section>
+
+      <section id="statsView" class="view stats-view">
+        <div class="section-heading"><button class="back-button" id="backButton">‹</button><div><span class="eyebrow">最近 30 天</span><h2 id="statsTitle">使用趋势</h2></div></div>
+        <div class="stats-summary"><span>请求<strong id="totalRequests">0</strong></span><span>Token<strong id="totalTokens">0</strong></span></div>
+        <div class="chart-wrap"><canvas id="usageChart"></canvas><div class="chart-message" id="chartMessage">加载中…</div></div>
+      </section>
+    </main>
+    <div class="toast" id="toast" hidden></div>
+  </div>
+  <script src="../../media/chart.umd.min.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>

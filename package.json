@@ -1,0 +1,60 @@
+{
+  "name": "sub2api-account-usage",
+  "displayName": "Sub2API 账户用量",
+  "description": "Windows 11 系统托盘中的 Sub2API 账户用量监控工具。",
+  "version": "1.0.0",
+  "main": "src/main.js",
+  "author": "tsiens",
+  "license": "MIT",
+  "keywords": [
+    "sub2api",
+    "account",
+    "usage",
+    "quota",
+    "electron",
+    "windows"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tsiens/sub2api-account-usage.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/core/usage-service.js && node --check src/renderer/renderer.js",
+    "dist:win": "electron-builder --win nsis",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^38.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.tsiens.sub2api-account-usage",
+    "productName": "Sub2API 账户用量",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "media/**/*",
+      "icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sub2API 账户用量"
+    }
+  }
+}
