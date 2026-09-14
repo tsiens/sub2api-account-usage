@@ -1,7 +1,7 @@
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font: 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
-.float-shell { width: 100%; height: 30px; display: flex; align-items: center; padding: 0 6px; border: 1px solid rgba(148, 163, 184, .18); border-radius: 15px; outline: none; background: rgba(16, 19, 23, .3); color: #f1f5f9; box-shadow: 0 5px 14px rgba(0, 0, 0, .16); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
+.float-shell { width: 100%; height: 30px; display: flex; align-items: center; padding: 0 6px; border: 1px solid rgba(148, 163, 184, .18); border-radius: 15px; outline: none; background: rgba(16, 19, 23, .3); color: #f1f5f9; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
 .float-shell:hover { border-color: rgba(96, 165, 250, .48); background: rgba(24, 31, 41, .42); }
 .float-shell.dragging { cursor: grabbing; }
 .marquee-viewport { width: 100%; height: 30px; overflow: hidden; white-space: nowrap; }

@@ -31,6 +31,7 @@ let trayDefaultIcon;
 let refreshTimer;
 let rotationTimer;
 let floatPositionSaveTimer;
+let floatTopTimer;
 let fullscreenWatcher;
 let fullscreenSuppressed = false;
 let updateCheckTimer;
@@ -131,7 +132,7 @@ function createFloatBar() {
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
-    hasShadow: true,
+    hasShadow: false,
     skipTaskbar: true,
     focusable: false,
     alwaysOnTop: service ? service.getConfig().floatAlwaysOnTop : true,
@@ -177,8 +178,37 @@ function scheduleFloatPositionSave(x, y) {
 
 function setFloatingBarAlwaysOnTop(enabled) {
   if (!floatBar || floatBar.isDestroyed()) return;
-  if (enabled) floatBar.setAlwaysOnTop(true, 'floating');
+  if (enabled) {
+    floatBar.setAlwaysOnTop(true, 'screen-saver');
+    floatBar.moveTop();
+  }
   else floatBar.setAlwaysOnTop(false);
+}
+
+function restartFloatBarTopTimer(enabled) {
+  clearInterval(floatTopTimer);
+  floatTopTimer = undefined;
+  if (!enabled) return;
+  floatTopTimer = setInterval(() => {
+    if (!floatBar || floatBar.isDestroyed() || fullscreenSuppressed || !floatBar.isVisible()) return;
+    if (service?.getConfig().floatAlwaysOnTop === false) return;
+    floatBar.setAlwaysOnTop(true, 'screen-saver');
+    floatBar.moveTop();
+  }, 500);
+}
+
+function getTaskbarArea(display) {
+  const bounds = display.bounds;
+  const workArea = display.workArea;
+  const top = workArea.y - bounds.y;
+  const bottom = bounds.y + bounds.height - (workArea.y + workArea.height);
+  const left = workArea.x - bounds.x;
+  const right = bounds.x + bounds.width - (workArea.x + workArea.width);
+  if (top > 0) return { edge: 'top', x: bounds.x, y: bounds.y, width: bounds.width, height: top };
+  if (bottom > 0) return { edge: 'bottom', x: bounds.x, y: workArea.y + workArea.height, width: bounds.width, height: bottom };
+  if (left > 0) return { edge: 'left', x: bounds.x, y: bounds.y, width: left, height: bounds.height };
+  if (right > 0) return { edge: 'right', x: workArea.x + workArea.width, y: bounds.y, width: right, height: bounds.height };
+  return null;
 }
 
 function clampFloatBounds(x, y, width, height) {
@@ -186,7 +216,7 @@ function clampFloatBounds(x, y, width, height) {
     x: Math.round(x + width / 2),
     y: Math.round(y + height / 2)
   });
-  // Use the full display bounds so the bar can be placed in front of the taskbar.
+  // Allow the bar to enter the taskbar area; the taskbar snap below centers it there.
   const area = display.bounds;
   const maxX = Math.max(area.x, area.x + area.width - width);
   const maxY = Math.max(area.y, area.y + area.height - height);
@@ -196,6 +226,17 @@ function clampFloatBounds(x, y, width, height) {
   if (Math.abs(nextX - maxX) <= FLOAT_BAR_LIMITS.edgeSnap) nextX = maxX;
   if (Math.abs(nextY - area.y) <= FLOAT_BAR_LIMITS.edgeSnap) nextY = area.y;
   if (Math.abs(nextY - maxY) <= FLOAT_BAR_LIMITS.edgeSnap) nextY = maxY;
+
+  const taskbar = getTaskbarArea(display);
+  const overlapsTaskbar = taskbar && nextX < taskbar.x + taskbar.width && nextX + width > taskbar.x &&
+    nextY < taskbar.y + taskbar.height && nextY + height > taskbar.y;
+  if (overlapsTaskbar) {
+    if (taskbar.edge === 'top' || taskbar.edge === 'bottom') {
+      nextY = Math.round(taskbar.y + (taskbar.height - height) / 2);
+    } else {
+      nextX = Math.round(taskbar.x + (taskbar.width - width) / 2);
+    }
+  }
   return { x: nextX, y: nextY };
 }
 
@@ -224,15 +265,18 @@ function moveFloatBar(delta = {}) {
   const bounds = floatBar.getBounds();
   const position = clampFloatBounds(bounds.x + dx, bounds.y + dy, bounds.width, bounds.height);
   floatBar.setPosition(position.x, position.y, false);
+  if (service?.getConfig().floatAlwaysOnTop !== false) floatBar.moveTop();
   scheduleFloatPositionSave(position.x, position.y);
 }
 
 function syncFloatingBar(enabled, alwaysOnTop = service?.getConfig().floatAlwaysOnTop !== false) {
+  restartFloatBarTopTimer(enabled && !fullscreenSuppressed && alwaysOnTop);
   if (enabled && !fullscreenSuppressed) {
     createFloatBar();
     setFloatingBarAlwaysOnTop(alwaysOnTop);
     positionFloatBar();
     floatBar.showInactive();
+    setFloatingBarAlwaysOnTop(alwaysOnTop);
     floatBar.webContents.send('state', getPublicState());
   } else if (floatBar) {
     floatBar.hide();
@@ -283,6 +327,9 @@ public static class Sub2ApiWindowApi {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder className, int maxCount);
+
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
 
@@ -296,16 +343,21 @@ while ($true) {
     $window = [Sub2ApiWindowApi]::GetForegroundWindow()
     $isFullscreen = $false
     if ($window -ne [IntPtr]::Zero) {
-        $windowRect = New-Object Sub2ApiWindowApi+RECT
-        $monitor = [Sub2ApiWindowApi]::MonitorFromWindow($window, 2)
-        $monitorInfo = New-Object Sub2ApiWindowApi+MONITORINFO
-        $monitorInfo.CbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitorInfo)
-        if ($monitor -ne [IntPtr]::Zero -and [Sub2ApiWindowApi]::GetWindowRect($window, [ref]$windowRect) -and [Sub2ApiWindowApi]::GetMonitorInfo($monitor, [ref]$monitorInfo)) {
-            $monitorRect = $monitorInfo.RcMonitor
-            $isFullscreen = $windowRect.Left -eq $monitorRect.Left -and
-                $windowRect.Top -eq $monitorRect.Top -and
-                $windowRect.Right -eq $monitorRect.Right -and
-                $windowRect.Bottom -eq $monitorRect.Bottom
+        $className = New-Object System.Text.StringBuilder 256
+        [Sub2ApiWindowApi]::GetClassName($window, $className, $className.Capacity) | Out-Null
+        $isShellWindow = $className.ToString() -in @('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
+        if (-not $isShellWindow) {
+            $windowRect = New-Object Sub2ApiWindowApi+RECT
+            $monitor = [Sub2ApiWindowApi]::MonitorFromWindow($window, 2)
+            $monitorInfo = New-Object Sub2ApiWindowApi+MONITORINFO
+            $monitorInfo.CbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitorInfo)
+            if ($monitor -ne [IntPtr]::Zero -and [Sub2ApiWindowApi]::GetWindowRect($window, [ref]$windowRect) -and [Sub2ApiWindowApi]::GetMonitorInfo($monitor, [ref]$monitorInfo)) {
+                $monitorRect = $monitorInfo.RcMonitor
+                $isFullscreen = $windowRect.Left -eq $monitorRect.Left -and
+                    $windowRect.Top -eq $monitorRect.Top -and
+                    $windowRect.Right -eq $monitorRect.Right -and
+                    $windowRect.Bottom -eq $monitorRect.Bottom
+            }
         }
     }
     if ($isFullscreen) { [Console]::WriteLine('1') } else { [Console]::WriteLine('0') }
@@ -784,6 +836,7 @@ else {
     clearInterval(refreshTimer);
     clearInterval(rotationTimer);
     clearInterval(updateCheckTimer);
+    clearInterval(floatTopTimer);
     updateCheckInFlight = false;
     clearTimeout(floatPositionSaveTimer);
     stopFullscreenWatcher();
