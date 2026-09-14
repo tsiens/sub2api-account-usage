@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>检查更新</title>
+  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./update.css">
+</head>
+<body class="update-body">
+  <div class="update-shell">
+    <header class="update-titlebar">
+      <div>
+        <span class="eyebrow">Sub2API</span>
+        <h1>检查更新</h1>
+      </div>
+      <button class="icon-button" id="closeButton" title="关闭" aria-label="关闭">×</button>
+    </header>
+    <main class="update-content">
+      <p class="update-message" id="updateMessage">正在检查更新…</p>
+      <p class="update-version" id="updateVersion"></p>
+      <div class="update-progress-row" id="progressArea" hidden>
+        <div class="update-progress"><i id="progressBar"></i></div>
+        <strong id="progressPercent">0%</strong>
+      </div>
+      <p class="update-detail" id="updateDetail"></p>
+      <footer class="update-actions">
+        <button class="secondary-button" id="cancelButton" hidden>取消更新</button>
+        <button class="secondary-button" id="closeActionButton">关闭</button>
+        <button class="primary-button" id="installButton" hidden>重启并安装</button>
+      </footer>
+    </main>
+  </div>
+  <script src="./update.js"></script>
+</body>
+</html>

@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('sub2api', {
   getState: () => ipcRenderer.invoke('get-state'),
+  cancelUpdate: () => ipcRenderer.invoke('cancel-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  closeUpdate: () => ipcRenderer.send('close-update'),
+  onUpdateState: (callback) => ipcRenderer.on('update-state', (_event, state) => callback(state)),
   refresh: () => ipcRenderer.invoke('refresh'),
   saveConfig: (values) => ipcRenderer.invoke('save-config', values),
   login: (values) => ipcRenderer.invoke('login', values),

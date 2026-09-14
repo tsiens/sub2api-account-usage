@@ -1,15 +1,17 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, dialog, ipcMain, nativeImage, screen, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
+const { CancellationToken, CancellationError } = require('builder-util-runtime');
 const { UsageService, DEFAULT_UPDATE_URL, accountDisplayName, formatCountdown, quotaPressure } = require('./core/usage-service');
 
 const APP_ID = 'com.tsiens.sub2api-account-usage';
 const PANEL_SIZE = { width: 440, height: 650 };
+const UPDATE_WINDOW_SIZE = { width: 410, height: 260 };
 const FLOAT_BAR_SIZE = { width: 90, height: 30 };
 const FLOAT_BAR_LIMITS = { minWidth: 90, maxWidth: 420, edgeSnap: 14 };
 const DEFAULT_CONFIG = { baseUrl: '', updateUrl: DEFAULT_UPDATE_URL, updateInterval: 300, rotationInterval: 5, requestTimeout: 15000, allowInsecureTls: false, showFloatingBar: true, floatAlwaysOnTop: true };
@@ -23,6 +25,7 @@ function normalizeFloatPosition(value) {
 
 let tray;
 let panel;
+let updateWindow;
 let floatBar;
 let settingsWindow;
 let service;
@@ -38,8 +41,13 @@ let updateCheckTimer;
 let updateDownloadInFlight = false;
 let updateCheckInFlight = false;
 let manualUpdateCheckPending = false;
+let updateCancellationToken;
+let updateDownloadPromise;
+let updateCancellationRequested = false;
+let updateCancelInFlight = false;
 let configuredUpdateUrl = '';
 let autoUpdaterInitialized = false;
+let updateUiState = { status: 'idle', version: '', percent: 0, transferred: 0, total: 0, speed: 0, message: '' };
 let state = { status: 'needs-server', accounts: [], failed: [], message: '请配置 Sub2API 服务器地址。', refreshedAt: null };
 let rotationIndex = 0;
 
@@ -411,38 +419,141 @@ function updateFeedFromUrl(value) {
   return { provider: 'generic', url: `${parsed.toString().replace(/\/+$/, '')}/` };
 }
 
-function finishManualUpdateCheck(message, detail = '', type = 'info') {
-  if (!manualUpdateCheckPending) return;
+function getUpdateCacheDirectory() {
+  const localAppData = process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local');
+  return path.join(localAppData, 'sub2api-account-usage-updater');
+}
+
+function sendUpdateState() {
+  if (!updateWindow || updateWindow.isDestroyed() || updateWindow.webContents.isLoading()) return;
+  updateWindow.webContents.send('update-state', updateUiState);
+}
+
+function setUpdateUiState(next) {
+  updateUiState = { ...updateUiState, ...next };
+  sendUpdateState();
+}
+
+function createUpdateWindow() {
+  if (updateWindow) return;
+  updateWindow = new BrowserWindow({
+    width: UPDATE_WINDOW_SIZE.width,
+    height: UPDATE_WINDOW_SIZE.height,
+    minWidth: UPDATE_WINDOW_SIZE.width,
+    minHeight: UPDATE_WINDOW_SIZE.height,
+    maxWidth: UPDATE_WINDOW_SIZE.width,
+    maxHeight: UPDATE_WINDOW_SIZE.height,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  updateWindow.loadFile(path.join(__dirname, 'renderer', 'update.html'));
+  updateWindow.webContents.on('did-finish-load', sendUpdateState);
+  updateWindow.on('close', (event) => {
+    if (!updateDownloadInFlight || updateCancellationRequested) return;
+    event.preventDefault();
+    void cancelUpdate(true);
+  });
+  updateWindow.on('closed', () => { updateWindow = undefined; });
+}
+
+function showUpdateWindow(next = {}) {
+  if (!updateWindow) createUpdateWindow();
+  setUpdateUiState(next);
+  if (updateWindow.isMinimized()) updateWindow.restore();
+  updateWindow.show();
+  updateWindow.focus();
+  sendUpdateState();
+}
+
+async function clearUpdateCache() {
+  try {
+    await fs.promises.rm(getUpdateCacheDirectory(), { recursive: true, force: true });
+    appendLog('更新缓存已清空。');
+  } catch (error) {
+    appendLog(`清空更新缓存失败：${error.message || error}`);
+  }
+}
+
+function handleUpdateError(error) {
+  if (updateCancellationRequested || error instanceof CancellationError || error?.message === 'cancelled') return;
+  updateCheckInFlight = false;
+  updateDownloadInFlight = false;
   manualUpdateCheckPending = false;
-  void dialog.showMessageBox({
-    type,
-    title: '检查更新',
-    message,
-    detail,
-    buttons: ['确定'],
-    noLink: true
-  }).catch((error) => appendLog(`更新提示窗口失败：${error.message || error}`));
+  setUpdateUiState({ status: 'error', message: error.message || String(error), percent: 0 });
+  appendLog(`自动更新错误：${error.message || error}`);
+}
+
+async function cancelUpdate(closeAfter = false) {
+  if (updateCancelInFlight) return;
+  if (!updateDownloadInFlight && !updateCheckInFlight) {
+    await clearUpdateCache();
+    setUpdateUiState({ status: 'cancelled', message: '已取消，更新缓存已清空。', percent: 0, transferred: 0, total: 0, speed: 0 });
+    if (closeAfter) updateWindow?.hide();
+    return;
+  }
+  updateCancelInFlight = true;
+  updateCancellationRequested = true;
+  updateCancellationToken?.cancel();
+  setUpdateUiState({ status: 'cancelling', message: '正在取消并清空更新缓存…' });
+  try {
+    await updateDownloadPromise;
+  } catch { /* Cancellation is expected here. */ }
+  updateCheckInFlight = false;
+  updateDownloadInFlight = false;
+  updateCancellationToken = undefined;
+  updateDownloadPromise = undefined;
+  await clearUpdateCache();
+  updateCancellationRequested = false;
+  manualUpdateCheckPending = false;
+  updateCancelInFlight = false;
+  setUpdateUiState({ status: 'cancelled', message: '已取消，更新缓存已清空。', percent: 0, transferred: 0, total: 0, speed: 0 });
+  if (closeAfter) updateWindow?.hide();
+}
+
+function closeUpdateWindow() {
+  if (updateDownloadInFlight) {
+    void cancelUpdate(true);
+    return;
+  }
+  updateWindow?.hide();
+}
+
+function installDownloadedUpdate() {
+  if (updateUiState.status === 'downloaded') autoUpdater.quitAndInstall();
 }
 
 function checkForUpdates(manual = false) {
-  if (!app.isPackaged) {
-    if (manual) {
-      void dialog.showMessageBox({ title: '检查更新', message: '开发模式不检查更新。', buttons: ['确定'], noLink: true });
-    }
+  if (manual && (updateDownloadInFlight || updateCheckInFlight)) {
+    manualUpdateCheckPending = true;
+    showUpdateWindow(updateUiState);
     return;
   }
-  if (!configuredUpdateUrl || updateDownloadInFlight || updateCheckInFlight) {
-    if (manual) {
-      const message = updateDownloadInFlight ? '更新正在下载中，请稍候。' : '更新检查正在进行中，请稍候。';
-      void dialog.showMessageBox({ title: '检查更新', message, buttons: ['确定'], noLink: true });
-    }
+  if (manual) {
+    showUpdateWindow({ status: 'checking', version: '', percent: 0, transferred: 0, total: 0, speed: 0, message: '正在检查更新…' });
+  }
+  if (!app.isPackaged) {
+    if (manual) setUpdateUiState({ status: 'error', message: '开发模式不检查更新。' });
+    return;
+  }
+  if (!configuredUpdateUrl) {
+    if (manual) setUpdateUiState({ status: 'error', message: '更新地址未配置。' });
     return;
   }
   updateCheckInFlight = true;
   manualUpdateCheckPending = manual;
   void autoUpdater.checkForUpdates().catch((error) => {
-    updateCheckInFlight = false;
-    finishManualUpdateCheck('检查更新失败。', error.message || String(error), 'error');
+    handleUpdateError(error);
     appendLog(`更新检查失败：${error.message || error}`);
   });
 }
@@ -475,38 +586,42 @@ function setupAutoUpdater(updateUrl) {
       updateCheckInFlight = false;
       if (updateDownloadInFlight) return;
       updateDownloadInFlight = true;
+      updateCancellationRequested = false;
+      updateCancellationToken = new CancellationToken();
+      setUpdateUiState({ status: 'downloading', version: info?.version || '新版本', percent: 0, transferred: 0, total: 0, speed: 0, message: '正在下载更新…' });
       appendLog(`发现新版本 ${info?.version || '未知'}，开始自动下载。`);
-      void autoUpdater.downloadUpdate().catch((error) => {
-        updateDownloadInFlight = false;
-        finishManualUpdateCheck('更新下载失败。', error.message || String(error), 'error');
+      updateDownloadPromise = autoUpdater.downloadUpdate(updateCancellationToken).catch((error) => {
+        handleUpdateError(error);
         appendLog(`更新下载失败：${error.message || error}`);
+      }).finally(() => {
+        updateDownloadPromise = undefined;
+        updateCancellationToken = undefined;
+      });
+    });
+    autoUpdater.on('download-progress', (progress) => {
+      if (!updateDownloadInFlight) return;
+      setUpdateUiState({
+        status: 'downloading',
+        percent: Math.max(0, Math.min(100, Number(progress?.percent) || 0)),
+        transferred: Number(progress?.transferred) || 0,
+        total: Number(progress?.total) || 0,
+        speed: Number(progress?.bytesPerSecond) || 0,
+        message: '正在下载更新…'
       });
     });
     autoUpdater.on('update-not-available', () => {
       updateCheckInFlight = false;
-      finishManualUpdateCheck('当前已是最新版本。');
+      manualUpdateCheckPending = false;
+      setUpdateUiState({ status: 'latest', version: autoUpdater.currentVersion?.version || app.getVersion(), percent: 0, message: '当前已是最新版本。' });
     });
     autoUpdater.on('update-downloaded', (info) => {
       updateDownloadInFlight = false;
-      const version = info?.version || '新版本';
-      void dialog.showMessageBox({
-        type: 'info',
-        title: 'Sub2API 有新版本',
-        message: `版本 ${version} 已下载完成。`,
-        detail: '现在重启并安装更新，还是稍后安装？',
-        buttons: ['立即重启', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true
-      }).then(({ response }) => {
-        if (response === 0) autoUpdater.quitAndInstall();
-      }).catch((error) => appendLog(`更新确认窗口失败：${error.message || error}`));
+      manualUpdateCheckPending = false;
+      setUpdateUiState({ status: 'downloaded', version: info?.version || '新版本', percent: 100, transferred: 0, total: 0, speed: 0, message: '更新已下载完成。' });
+      showUpdateWindow();
     });
     autoUpdater.on('error', (error) => {
-      updateCheckInFlight = false;
-      updateDownloadInFlight = false;
-      finishManualUpdateCheck('更新失败。', error.message || String(error), 'error');
-      appendLog(`自动更新错误：${error.message || error}`);
+      handleUpdateError(error);
     });
     updateCheckTimer = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL);
   }
@@ -754,6 +869,9 @@ function showLogs() {
 
 function registerIpc() {
   ipcMain.handle('get-state', () => getPublicState());
+  ipcMain.handle('cancel-update', () => cancelUpdate());
+  ipcMain.handle('install-update', () => installDownloadedUpdate());
+  ipcMain.on('close-update', closeUpdateWindow);
   ipcMain.handle('refresh', () => refreshUsage(true));
   ipcMain.handle('save-config', async (_event, values) => {
     const config = await service.setConfig(values);
@@ -808,6 +926,7 @@ async function initialize() {
   service = new UsageService({ store: appStore, logger: (message) => appendLog(message) });
   registerIpc();
   createPanel();
+  createUpdateWindow();
   createTray();
   state.authMode = await service.getAuthMode();
   const config = service.getConfig();
@@ -838,6 +957,7 @@ else {
     clearInterval(updateCheckTimer);
     clearInterval(floatTopTimer);
     updateCheckInFlight = false;
+    updateCancellationToken?.cancel();
     clearTimeout(floatPositionSaveTimer);
     stopFullscreenWatcher();
     if (floatBar && !floatBar.isDestroyed()) {
