@@ -52,7 +52,7 @@ jobs:
         run: |
           $assets = @(
             Get-ChildItem -LiteralPath 'release' -File -ErrorAction SilentlyContinue | Where-Object {
-              $_.Extension -in @('.exe', '.blockmap', '.yml')
+              $_.Extension -in @('.exe', '.blockmap') -or $_.Name -eq 'latest.yml'
             } | ForEach-Object { $_.FullName }
             Get-ChildItem -LiteralPath 'release-portable' -File -ErrorAction SilentlyContinue | Where-Object {
               $_.Extension -eq '.exe'
