@@ -31,16 +31,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Install Tauri CLI
+        shell: pwsh
+        run: cargo install tauri-cli --version 2.11.4 --locked
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -51,11 +49,7 @@ jobs:
         shell: pwsh
         run: |
           $tagVersion = $env:GITHUB_REF_NAME.Substring(1)
-          $packageVersion = node -p "require('./package.json').version"
-          if ($tagVersion -ne $packageVersion) {
-            throw "Tag version $tagVersion does not match package.json version $packageVersion"
-          }
-          $tauriVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
           if ($tagVersion -ne $tauriVersion) {
             throw "Tag version $tagVersion does not match src-tauri/tauri.conf.json version $tauriVersion"
           }
@@ -64,11 +58,11 @@ jobs:
             throw "Tag version $tagVersion does not match src-tauri/Cargo.toml version $cargoVersion"
           }
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Rust format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-      - name: Syntax check
-        run: npm run check
+      - name: Rust check
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
@@ -77,12 +71,12 @@ jobs:
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Windows installer
-        run: npm run dist:win
+        run: cargo tauri build --bundles nsis
 
       - name: Prepare release assets
         shell: pwsh
         run: |
-          $version = node -p "require('./package.json').version"
+          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
           $installer = Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
@@ -160,7 +154,7 @@ jobs:
           $releaseNotes = [regex]::Replace($releaseNotes, '(?m)^变更：[ \t]*\r?$', "## 变更`n")
           $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
           if ($LASTEXITCODE -eq 0 -and $releaseId) {
-            $version = node -p "require('./package.json').version"
+            $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
             $installerName = "Sub2API.Setup.$version.exe"
             $checksumName = "Sub2API.Setup.$version.exe.sha256"
             $existingAssets = @(gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name')
