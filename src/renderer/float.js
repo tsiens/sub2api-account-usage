@@ -33,8 +33,8 @@ function providerIcon(account) {
 }
 
 function renderProviderIcon(icon) {
-  if (icons[icon]) return `<img class="provider-logo" src="./${icons[icon]}.svg" alt="">`;
-  return '<img class="provider-logo" src="./openai.svg" alt="">';
+  if (icons[icon]) return `<img class="provider-logo" src="./${icons[icon]}.svg" alt="" draggable="false">`;
+  return '<img class="provider-logo" src="./openai.svg" alt="" draggable="false">';
 }
 
 function render(state) {
@@ -77,6 +77,7 @@ function advanceAccount() {
 
 shell.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
+  event.preventDefault();
   dragState = {
     pointerId: event.pointerId,
     startX: event.screenX,
@@ -90,6 +91,16 @@ shell.addEventListener('pointerdown', (event) => {
   dragReady = window.sub2api.beginFloatDrag().catch(() => {});
   shell.classList.add('dragging');
   shell.setPointerCapture?.(event.pointerId);
+});
+
+shell.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  void window.sub2api.showFloatMenu().catch(() => {});
+});
+
+shell.addEventListener('dragstart', (event) => {
+  event.preventDefault();
 });
 
 // Coalesce pointer events into one window move per frame: dragging a native window is

@@ -2,10 +2,10 @@
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font: 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
 .float-shell { width: 96px; height: 30px; display: flex; align-items: center; gap: 0; padding: 0; border: 0; border-radius: 4px; outline: none; appearance: none; background: transparent; color: #fff; cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
-.float-shell.theme-light { color: #000; }
-.float-shell.theme-dark { color: #fff; }
-.float-shell:hover { background: rgba(0, 0, 0, .5); }
-.float-shell.theme-light:hover { background: rgba(255, 255, 255, .5); }
+.float-shell * { pointer-events: none; user-select: none; -webkit-user-drag: none; }
+.float-shell.theme-light { color: #000; --hover-background: rgba(255, 255, 255, .5); }
+.float-shell.theme-dark { color: #fff; --hover-background: rgba(0, 0, 0, .5); }
+.float-shell:hover { background: var(--hover-background); }
 .float-shell.dragging { cursor: grabbing; }
 .marquee-viewport { display: block; flex: 1 1 auto; min-width: 0; width: 100%; height: 30px; overflow: hidden; white-space: nowrap; }
 .marquee-track { display: flex; flex-direction: column; min-width: 0; width: 100%; transform: translateY(0); font: inherit; line-height: 1; }

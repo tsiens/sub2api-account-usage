@@ -20,7 +20,7 @@
 
     <main>
       <section id="dashboardView" class="view active">
-        <div class="summary-row"><div><span class="eyebrow">当前状态</span><h1 id="statusTitle">准备中</h1></div><span class="status-dot" id="statusDot"></span></div>
+        <div class="summary-row"><div><span class="eyebrow">当前状态</span><button class="status-title-button" id="statusTitle" type="button">准备中</button></div><span class="status-dot" id="statusDot"></span></div>
         <div class="notice" id="notice" hidden></div>
         <div class="account-list" id="accountList"></div>
         <div class="empty-state" id="emptyState" hidden><div class="empty-icon">○</div><strong id="emptyTitle">暂无账户用量</strong><p id="emptyMessage">请在设置中配置服务器和管理员鉴权。</p><button class="primary-button" id="emptySettingsButton">打开设置</button></div>
@@ -31,6 +31,7 @@
         <div class="section-heading"><div><span class="eyebrow">应用设置</span><h2>连接与刷新</h2></div></div>
         <form id="configForm" class="form-stack">
           <label>服务器地址<input id="baseUrl" type="url" placeholder="https://sub2api.example.com" autocomplete="url"><small>填写服务根地址，不要追加 /api/v1。</small></label>
+          <label>后台页面路径<input id="adminPath" type="text" placeholder="admin/dashboard" autocomplete="off"><small>点击账户数量时，用默认浏览器打开此路径。</small></label>
           <label>更新地址<input id="updateUrl" type="url" placeholder="https://github.com/tsiens/sub2api-account-usage" autocomplete="url"><small>支持 GitHub 仓库、ghproxy 前缀，或提供 latest.json 的更新目录。</small></label>
           <div class="form-grid"><label>自动刷新（秒）<input id="updateInterval" type="number" min="30" step="1"></label><label>账户切换（秒）<input id="rotationInterval" type="number" min="1" step="1"></label></div>
           <div class="form-grid"><label>请求超时（毫秒）<input id="requestTimeout" type="number" min="1000" step="100"></label><label class="checkbox-label"><input id="allowInsecureTls" type="checkbox"><span>允许无效 TLS 证书</span></label></div>
@@ -48,16 +49,10 @@
         <div class="settings-section logs-section"><div class="section-label"><span>本地日志</span></div><p>日志文件位于应用安装目录：</p><button type="button" class="log-open-button" id="openLogButton"><code id="logDirectory">app.log</code><span>点击打开</span></button></div>
       </section>
 
-      <section id="statsView" class="view stats-view">
-        <div class="section-heading"><button class="back-button" id="backButton">‹</button><div><span class="eyebrow">最近 30 天</span><h2 id="statsTitle">使用趋势</h2></div></div>
-        <div class="stats-summary"><span>请求<strong id="totalRequests">0</strong></span><span>Token<strong id="totalTokens">0</strong></span></div>
-        <div class="chart-wrap"><canvas id="usageChart"></canvas><div class="chart-message" id="chartMessage">加载中…</div></div>
-      </section>
     </main>
     <div class="toast" id="toast" hidden></div>
   </div>
   <script src="./bridge.js"></script>
-  <script src="./media/chart.umd.min.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

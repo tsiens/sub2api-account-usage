@@ -1,14 +1,11 @@
 use crate::{
-    models::{
-        AccountStats, AccountUsage, Config, FailedAccount, LoginResult, StatsPoint, UsageRefresh,
-    },
+    models::{AccountUsage, Config, FailedAccount, LoginResult, UsageRefresh},
     store::{append_log, Store},
 };
-use chrono::{Duration, NaiveDate, Utc};
-use chrono_tz::Asia::Shanghai;
+use chrono::Utc;
 use reqwest::{header, Method, StatusCode};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use thiserror::Error;
 use url::Url;
 
@@ -292,22 +289,6 @@ impl UsageService {
         })
     }
 
-    pub async fn account_stats(
-        &self,
-        account_id: &str,
-        days: usize,
-    ) -> ServiceResult<AccountStats> {
-        let days = days.max(1);
-        let path = format!(
-            "/api/v1/admin/accounts/{}/stats?days={days}&timezone=Asia%2FShanghai",
-            url::form_urlencoded::byte_serialize(account_id.as_bytes()).collect::<String>()
-        );
-        let raw = self
-            .api_request_with_retry(Method::GET, &path, None)
-            .await?;
-        Ok(normalize_account_stats(&raw, days))
-    }
-
     async fn list_accounts(&self) -> ServiceResult<Vec<Value>> {
         self.list_accounts_using(None).await
     }
@@ -529,6 +510,10 @@ impl UsageService {
 
 fn normalize_config(mut config: Config) -> Config {
     config.base_url = config.base_url.trim().trim_end_matches('/').to_string();
+    config.admin_path = config.admin_path.trim().trim_matches('/').to_string();
+    if config.admin_path.is_empty() {
+        config.admin_path = "admin/dashboard".into();
+    }
     config.update_url = config.update_url.trim().trim_end_matches('/').to_string();
     if config.update_url.is_empty() {
         config.update_url = crate::models::DEFAULT_UPDATE_URL.into();
@@ -541,6 +526,11 @@ fn normalize_config(mut config: Config) -> Config {
 
 fn validate_config(mut config: Config) -> ServiceResult<Config> {
     config = normalize_config(config);
+    if config.admin_path.contains(['?', '#', '\\']) || config.admin_path.contains("://") {
+        return Err(ServiceError::Message(
+            "后台页面路径只能填写相对路径，例如 admin/dashboard。".into(),
+        ));
+    }
     if !config.base_url.is_empty() {
         let url = Url::parse(&config.base_url)
             .map_err(|_| ServiceError::Message("服务器地址无效。".into()))?;
@@ -705,53 +695,6 @@ fn value_message(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-fn normalize_account_stats(raw: &Value, days: usize) -> AccountStats {
-    let mut by_date: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
-    for item in raw
-        .get("history")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(date) = item
-            .get("date")
-            .and_then(Value::as_str)
-            .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
-        else {
-            continue;
-        };
-        let values = by_date.entry(date).or_insert((0.0, 0.0));
-        values.0 += non_negative(item.get("requests"));
-        values.1 += non_negative(item.get("tokens"));
-    }
-    let end = raw
-        .pointer("/summary/today/date")
-        .and_then(Value::as_str)
-        .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
-        .or_else(|| by_date.keys().next_back().copied())
-        .unwrap_or_else(|| Utc::now().with_timezone(&Shanghai).date_naive());
-    let mut history = Vec::with_capacity(days);
-    for offset in (0..days).rev() {
-        let date = end - Duration::days(offset as i64);
-        let (requests, tokens) = by_date.get(&date).copied().unwrap_or_default();
-        history.push(StatsPoint {
-            label: date.format("%m/%d").to_string(),
-            date: date.format("%Y-%m-%d").to_string(),
-            requests,
-            tokens,
-        });
-    }
-    AccountStats {
-        total_requests: history.iter().map(|item| item.requests).sum(),
-        total_tokens: history.iter().map(|item| item.tokens).sum(),
-        history,
-    }
-}
-
-fn non_negative(value: Option<&Value>) -> f64 {
-    number(value).unwrap_or(0.0).max(0.0)
-}
-
 fn number(value: Option<&Value>) -> Option<f64> {
     value.and_then(|value| {
         value
@@ -762,10 +705,7 @@ fn number(value: Option<&Value>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        account_supports_batch_usage, normalize_account_stats, server_origin, validate_config,
-        validate_usage,
-    };
+    use super::{account_supports_batch_usage, server_origin, validate_config, validate_usage};
     use crate::models::Config;
     use serde_json::json;
 
@@ -789,21 +729,6 @@ mod tests {
         assert!(account_supports_batch_usage(
             &json!({ "platform": "gemini", "type": "key" })
         ));
-    }
-
-    #[test]
-    fn stats_fill_missing_days_and_sum_strings() {
-        let stats = normalize_account_stats(
-            &json!({
-                "history": [{ "date": "2026-09-16", "requests": "2", "tokens": 300 }],
-                "summary": { "today": { "date": "2026-09-16" } }
-            }),
-            3,
-        );
-        assert_eq!(stats.history.len(), 3);
-        assert_eq!(stats.total_requests, 2.0);
-        assert_eq!(stats.total_tokens, 300.0);
-        assert_eq!(stats.history[2].date, "2026-09-16");
     }
 
     #[test]
@@ -831,5 +756,24 @@ mod tests {
             server_origin("https://example.com"),
             server_origin("https://example.com:8443")
         );
+    }
+
+    #[test]
+    fn admin_path_must_be_relative() {
+        let valid = Config {
+            admin_path: "/admin/dashboard/".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_config(valid).unwrap().admin_path,
+            "admin/dashboard"
+        );
+        for invalid in ["https://example.com/admin", "admin/dashboard?token=secret"] {
+            let config = Config {
+                admin_path: invalid.into(),
+                ..Default::default()
+            };
+            assert!(validate_config(config).is_err());
+        }
     }
 }

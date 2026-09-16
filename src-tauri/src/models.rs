@@ -8,6 +8,7 @@ pub const DEFAULT_UPDATE_URL: &str = "https://github.com/tsiens/sub2api-account-
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub base_url: String,
+    pub admin_path: String,
     pub update_url: String,
     pub update_interval: u64,
     pub rotation_interval: u64,
@@ -21,6 +22,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             base_url: String::new(),
+            admin_path: "admin/dashboard".into(),
             update_url: DEFAULT_UPDATE_URL.to_string(),
             update_interval: 300,
             rotation_interval: 5,
@@ -125,23 +127,6 @@ pub struct LoginResult {
     pub temp_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StatsPoint {
-    pub label: String,
-    pub date: String,
-    pub requests: f64,
-    pub tokens: f64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountStats {
-    pub history: Vec<StatsPoint>,
-    pub total_requests: f64,
-    pub total_tokens: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]

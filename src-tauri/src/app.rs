@@ -16,6 +16,7 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
+    Wry,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -211,18 +212,6 @@ async fn logout(
 }
 
 #[tauri::command]
-async fn get_stats(
-    runtime: State<'_, Arc<RuntimeState>>,
-    account_id: Value,
-) -> Result<crate::models::AccountStats, String> {
-    runtime
-        .service
-        .account_stats(&value_key(&account_id), 30)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 async fn begin_float_drag(
     app: AppHandle,
     runtime: State<'_, Arc<RuntimeState>>,
@@ -287,6 +276,29 @@ fn open_panel(app: AppHandle) {
 }
 
 #[tauri::command]
+fn open_admin_page(runtime: State<'_, Arc<RuntimeState>>) -> Result<(), String> {
+    let config = runtime.service.config();
+    if config.base_url.is_empty() {
+        return Err("请先配置 Sub2API 服务器地址。".into());
+    }
+    let mut url =
+        reqwest::Url::parse(&config.base_url).map_err(|_| "服务器地址无效。".to_string())?;
+    url.set_path(&format!("/{}", config.admin_path.trim_matches('/')));
+    open_external(url.as_str())
+}
+
+#[tauri::command]
+fn show_float_menu(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("float")
+        .ok_or_else(|| "悬浮条窗口不存在。".to_string())?;
+    let menu = build_app_menu(&app).map_err(|error| format!("创建悬浮条菜单失败：{error}"))?;
+    window
+        .popup_menu(&menu)
+        .map_err(|error| format!("显示悬浮条菜单失败：{error}"))
+}
+
+#[tauri::command]
 fn close_panel(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -328,14 +340,12 @@ fn get_float_theme(runtime: State<'_, Arc<RuntimeState>>) -> String {
         .clone()
 }
 
-#[tauri::command]
-fn open_log() -> Result<(), String> {
-    let path = crate::store::data_directory().join("app.log");
-    if !path.exists() {
-        std::fs::write(&path, b"").map_err(|error| format!("创建日志文件失败：{error}"))?;
-    }
+fn open_external(target: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
-    let file: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(path.as_os_str())
+    let file: Vec<u16> = std::ffi::OsStr::new(target)
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     let result = unsafe {
@@ -349,9 +359,18 @@ fn open_log() -> Result<(), String> {
         )
     };
     if result as isize <= 32 {
-        return Err("无法打开日志文件。".into());
+        return Err("无法打开外部页面。".into());
     }
     Ok(())
+}
+
+#[tauri::command]
+fn open_log() -> Result<(), String> {
+    let path = crate::store::data_directory().join("app.log");
+    if !path.exists() {
+        std::fs::write(&path, b"").map_err(|error| format!("创建日志文件失败：{error}"))?;
+    }
+    open_external(&path.display().to_string()).map_err(|_| "无法打开日志文件。".into())
 }
 
 pub fn run() {
@@ -359,6 +378,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_panel(app, "dashboard", "");
         }))
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_update_state,
@@ -368,13 +388,14 @@ pub fn run() {
             complete_login,
             set_api_key,
             logout,
-            get_stats,
             move_float,
             begin_float_drag,
             end_float_drag,
             get_data_directory,
             get_float_theme,
             open_log,
+            open_admin_page,
+            show_float_menu,
             open_panel,
             close_panel,
             cancel_update,
@@ -440,9 +461,31 @@ fn configure_windows(app: &AppHandle) {
 }
 
 fn create_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build_app_menu(app)?;
+    let icon = Image::from_bytes(include_bytes!("../../icon.png"))?;
+    TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .tooltip("Sub2API 账户用量")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_panel(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let refresh = MenuItem::with_id(app, "refresh", "刷新", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
-    let runtime = app.state::<Arc<RuntimeState>>();
     let startup_checked = platform::startup_enabled().unwrap_or_else(|error| {
         append_log(&error);
         false
@@ -460,14 +503,18 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         "float-always-on-top",
         "悬浮条置顶",
         true,
-        runtime.service.config().float_always_on_top,
+        app.state::<Arc<RuntimeState>>()
+            .service
+            .config()
+            .float_always_on_top,
         None::<&str>,
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
+    Menu::with_items(
         app,
         &[
+            &refresh,
             &settings,
             &update,
             &startup,
@@ -475,54 +522,46 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
             &separator,
             &exit,
         ],
-    )?;
-    let startup_item = startup.clone();
-    let top_item = always_on_top.clone();
-    let icon = Image::from_bytes(include_bytes!("../../icon.png"))?;
-    TrayIconBuilder::with_id("main-tray")
-        .icon(icon)
-        .tooltip("Sub2API 账户用量")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
+    )
+}
+
+fn handle_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "refresh" => {
+            let runtime = app.state::<Arc<RuntimeState>>().inner().clone();
+            let refresh_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                refresh_usage(&refresh_app, runtime).await;
+            });
+        }
+        "settings" => show_panel(app, "settings", ""),
+        "check-update" => {
+            let runtime = app.state::<Arc<RuntimeState>>();
+            runtime
+                .updates
+                .start(app.clone(), runtime.service.config().update_url, true);
+        }
+        "startup" => {
+            let enabled = platform::startup_enabled().unwrap_or(false);
+            if let Err(error) = platform::set_startup_enabled(!enabled) {
+                append_log(&error);
+            }
+        }
+        "float-always-on-top" => {
+            let runtime = app.state::<Arc<RuntimeState>>();
+            let current = runtime.service.config().float_always_on_top;
+            if let Err(error) = runtime
+                .service
+                .set_config(json!({ "floatAlwaysOnTop": !current }))
             {
-                toggle_panel(tray.app_handle());
+                append_log(&error.to_string());
             }
-        })
-        .on_menu_event(move |app, event| match event.id().as_ref() {
-            "settings" => show_panel(app, "settings", ""),
-            "check-update" => {
-                let runtime = app.state::<Arc<RuntimeState>>();
-                runtime
-                    .updates
-                    .start(app.clone(), runtime.service.config().update_url, true);
-            }
-            "startup" => {
-                let checked = startup_item.is_checked().unwrap_or(false);
-                if let Err(error) = platform::set_startup_enabled(checked) {
-                    let _ = startup_item.set_checked(!checked);
-                    append_log(&error);
-                }
-            }
-            "float-always-on-top" => {
-                let runtime = app.state::<Arc<RuntimeState>>();
-                let checked = top_item.is_checked().unwrap_or(true);
-                let _ = runtime
-                    .service
-                    .set_config(json!({ "floatAlwaysOnTop": checked }));
-                sync_floating_bar(app, &runtime, false);
-                runtime.broadcast(app);
-            }
-            "exit" => app.exit(0),
-            _ => {}
-        })
-        .build(app)?;
-    Ok(())
+            sync_floating_bar(app, &runtime, false);
+            runtime.broadcast(app);
+        }
+        "exit" => app.exit(0),
+        _ => {}
+    }
 }
 
 async fn refresh_usage(app: &AppHandle, runtime: Arc<RuntimeState>) {
@@ -994,14 +1033,6 @@ fn format_countdown(value: Option<&Value>) -> String {
         format!("{minutes}分{remaining}秒")
     } else {
         format!("{remaining}秒")
-    }
-}
-
-fn value_key(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
-        value => value.to_string().trim_matches('"').to_string(),
     }
 }
 

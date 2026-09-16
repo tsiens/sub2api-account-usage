@@ -2,11 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 let pending2fa = null;
-let chart = null;
-let activeView = 'dashboard';
 let lastConfigKey = '';
 let lastAccountsKey = '';
-let statsRequest = 0;
 
 const icons = { openai: '◉', gpt: '◉', chatgpt: '◉', claude: '◆', anthropic: '◆', 'google-gemini': '✦', google: '✦', gemini: '✦', xai: '×', grok: '×', kimi: 'K', moonshot: 'K', copilot: '●', github: '●', sparkle: '•' };
 
@@ -52,13 +49,13 @@ function render(state) {
   const refreshed = state.refreshedAt ? new Date(state.refreshedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
   $('lastUpdated').textContent = refreshed ? `上次更新 ${refreshed}` : (state.isRefreshing ? '正在刷新…' : '尚未刷新');
   statusTitle.textContent = state.isRefreshing ? '正在刷新…' : accounts.length ? `${accounts.length} 个账户` : state.status === 'error' ? '连接失败' : '需要配置';
+  statusTitle.disabled = !accounts.length || state.isRefreshing;
   dot.className = `status-dot ${state.status === 'error' ? 'error' : state.status === 'ready' && accounts.some((item) => Math.max(Number(item.usage?.five_hour?.utilization) || 0, Number(item.usage?.seven_day?.utilization) || 0) >= 95) ? 'warn' : ''}`;
   notice.hidden = !(state.message && (state.status !== 'ready' || state.failed?.length));
   notice.textContent = state.failed?.length ? `${state.message || ''} ${state.failed.map((item) => `${item.accountName}: ${item.error}`).join('；')}` : (state.message || '');
   const accountsKey = JSON.stringify(accounts);
   if (accountsKey !== lastAccountsKey) {
     list.innerHTML = accounts.map((result) => accountCard(result)).join('');
-    list.querySelectorAll('[data-account-id]').forEach((button) => button.addEventListener('click', () => openStats(button.dataset.accountId, button.dataset.accountName)));
     lastAccountsKey = accountsKey;
   }
   updateCountdowns();
@@ -83,7 +80,7 @@ function accountCard(result) {
   const name = escapeHtml(account.name || '未命名账户');
   const providerKey = provider(account);
   const providerLabel = escapeHtml(icons[providerKey] || providerKey);
-  return `<article class="account-card"><div class="account-head"><button class="account-name account-link" data-account-id="${escapeHtml(account.id)}" data-account-name="${name}"><i class="provider-dot"></i><span>${providerLabel} ${name}</span></button><span class="updated">更新于 ${escapeHtml(formatTime(usage.updated_at))}</span></div>${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}</article>`;
+  return `<article class="account-card"><div class="account-head"><div class="account-name"><i class="provider-dot"></i><span>${providerLabel} ${name}</span></div><span class="updated">更新于 ${escapeHtml(formatTime(usage.updated_at))}</span></div>${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}</article>`;
 }
 
 function quota(label, item) {
@@ -109,6 +106,7 @@ function formatTime(value) {
 
 function fillConfig(config) {
   $('baseUrl').value = config.baseUrl || '';
+  $('adminPath').value = config.adminPath || 'admin/dashboard';
   $('updateUrl').value = config.updateUrl || '';
   $('updateInterval').value = config.updateInterval ?? 300;
   $('rotationInterval').value = config.rotationInterval ?? 5;
@@ -118,7 +116,6 @@ function fillConfig(config) {
 }
 
 function switchView(view) {
-  activeView = view;
   document.querySelectorAll('.view').forEach((item) => item.classList.toggle('active', item.id === `${view}View`));
   document.querySelectorAll('.tab').forEach((item) => item.classList.toggle('active', item.dataset.view === view));
 }
@@ -131,40 +128,10 @@ function toast(message) {
   toast.timer = setTimeout(() => { element.hidden = true; }, 2800);
 }
 
-async function openStats(accountId, accountName) {
-  const request = ++statsRequest;
-  switchView('stats');
-  $('statsTitle').textContent = accountName || '使用趋势';
-  $('chartMessage').textContent = '加载中…';
-  $('chartMessage').hidden = false;
-  try {
-    const stats = await window.sub2api.getStats(accountId);
-    if (request !== statsRequest) return;
-    $('totalRequests').textContent = integer(stats.totalRequests);
-    $('totalTokens').textContent = token(stats.totalTokens);
-    const history = stats.history || [];
-    const context = $('usageChart').getContext('2d');
-    if (chart) chart.destroy();
-    chart = new Chart(context, {
-      type: 'line',
-      data: { labels: history.map((item) => item.label), datasets: [
-        { label: '请求', data: history.map((item) => item.requests), borderColor: '#fb923c', backgroundColor: 'rgba(251,146,60,.12)', yAxisID: 'requests', tension: .28, pointRadius: 2, borderWidth: 2 },
-        { label: 'Token', data: history.map((item) => item.tokens), borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,.12)', yAxisID: 'tokens', tension: .28, pointRadius: 2, borderWidth: 2 }
-      ] },
-      options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: '#8e9aa8', usePointStyle: true } } }, scales: { x: { ticks: { color: '#8e9aa8', maxTicksLimit: 8 }, grid: { color: '#2d353f' } }, requests: { beginAtZero: true, ticks: { color: '#fb923c' }, grid: { color: '#2d353f' } }, tokens: { beginAtZero: true, position: 'right', ticks: { color: '#4ade80' }, grid: { drawOnChartArea: false } } } }
-    });
-    $('chartMessage').hidden = history.some((item) => item.requests || item.tokens);
-    if (!history.some((item) => item.requests || item.tokens)) $('chartMessage').textContent = '该时间范围暂无使用数据';
-  } catch (error) {
-    if (request !== statsRequest) return;
-    $('chartMessage').textContent = error.message || '加载趋势失败';
-  }
-}
-
 async function saveConfig(event) {
   event.preventDefault();
   try {
-    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: Number($('updateInterval').value), rotationInterval: Number($('rotationInterval').value), requestTimeout: Number($('requestTimeout').value), allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
+    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), adminPath: $('adminPath').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: Number($('updateInterval').value), rotationInterval: Number($('rotationInterval').value), requestTimeout: Number($('requestTimeout').value), allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
     toast('连接设置已保存');
   } catch (error) { toast(error.message || '保存失败'); }
 }
@@ -204,10 +171,14 @@ $('refreshButton').addEventListener('click', async () => {
   try { await window.sub2api.refresh(); toast('刷新完成'); }
   catch (error) { toast(error.message || '刷新失败'); }
 });
+$('statusTitle').addEventListener('click', async () => {
+  if ($('statusTitle').disabled) return;
+  try { await window.sub2api.openAdminPage(); }
+  catch (error) { toast(error.message || '打开后台页面失败'); }
+});
 $('closeButton').addEventListener('click', () => window.sub2api.close());
 $('settingsShortcut').addEventListener('click', () => switchView('settings'));
 $('emptySettingsButton').addEventListener('click', () => switchView('settings'));
-$('backButton').addEventListener('click', () => switchView('dashboard'));
 $('configForm').addEventListener('submit', saveConfig);
 $('apiKeyForm').addEventListener('submit', saveApiKey);
 $('loginForm').addEventListener('submit', login);
