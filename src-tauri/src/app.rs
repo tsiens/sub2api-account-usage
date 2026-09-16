@@ -443,6 +443,18 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
     let runtime = app.state::<Arc<RuntimeState>>();
+    let startup_checked = platform::startup_enabled().unwrap_or_else(|error| {
+        append_log(&error);
+        false
+    });
+    let startup = CheckMenuItem::with_id(
+        app,
+        "startup",
+        "开机自启动",
+        true,
+        startup_checked,
+        None::<&str>,
+    )?;
     let always_on_top = CheckMenuItem::with_id(
         app,
         "float-always-on-top",
@@ -455,8 +467,16 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&settings, &update, &always_on_top, &separator, &exit],
+        &[
+            &settings,
+            &update,
+            &startup,
+            &always_on_top,
+            &separator,
+            &exit,
+        ],
     )?;
+    let startup_item = startup.clone();
     let top_item = always_on_top.clone();
     let icon = Image::from_bytes(include_bytes!("../../icon.png"))?;
     TrayIconBuilder::with_id("main-tray")
@@ -481,6 +501,13 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 runtime
                     .updates
                     .start(app.clone(), runtime.service.config().update_url, true);
+            }
+            "startup" => {
+                let checked = startup_item.is_checked().unwrap_or(false);
+                if let Err(error) = platform::set_startup_enabled(checked) {
+                    let _ = startup_item.set_checked(!checked);
+                    append_log(&error);
+                }
             }
             "float-always-on-top" => {
                 let runtime = app.state::<Arc<RuntimeState>>();
@@ -824,63 +851,23 @@ fn clamp_float_position(
     else {
         return FloatPosition { x, y };
     };
-    let max_x = monitor.x + monitor.width - width;
-    let max_y = monitor.y + monitor.height - height;
-    let mut next_x = x.clamp(monitor.x, max_x.max(monitor.x));
-    let mut next_y = y.clamp(monitor.y, max_y.max(monitor.y));
-    if (next_x - monitor.x).abs() <= EDGE_SNAP {
-        next_x = monitor.x;
+    let min_x = monitor.work_x;
+    let min_y = monitor.work_y;
+    let max_x = monitor.work_x + monitor.work_width - width;
+    let max_y = monitor.work_y + monitor.work_height - height;
+    let mut next_x = x.clamp(min_x, max_x.max(min_x));
+    let mut next_y = y.clamp(min_y, max_y.max(min_y));
+    if (next_x - min_x).abs() <= EDGE_SNAP {
+        next_x = min_x;
     }
     if (next_x - max_x).abs() <= EDGE_SNAP {
         next_x = max_x;
     }
-    if (next_y - monitor.y).abs() <= EDGE_SNAP {
-        next_y = monitor.y;
+    if (next_y - min_y).abs() <= EDGE_SNAP {
+        next_y = min_y;
     }
     if (next_y - max_y).abs() <= EDGE_SNAP {
         next_y = max_y;
-    }
-
-    let top = monitor.work_y - monitor.y;
-    let bottom = monitor.y + monitor.height - (monitor.work_y + monitor.work_height);
-    let left = monitor.work_x - monitor.x;
-    let right = monitor.x + monitor.width - (monitor.work_x + monitor.work_width);
-    let (task_x, task_y, task_width, task_height, horizontal) = if top > 0 {
-        (monitor.x, monitor.y, monitor.width, top, true)
-    } else if bottom > 0 {
-        (
-            monitor.x,
-            monitor.work_y + monitor.work_height,
-            monitor.width,
-            bottom,
-            true,
-        )
-    } else if left > 0 {
-        (monitor.x, monitor.y, left, monitor.height, false)
-    } else if right > 0 {
-        (
-            monitor.work_x + monitor.work_width,
-            monitor.y,
-            right,
-            monitor.height,
-            false,
-        )
-    } else {
-        return FloatPosition {
-            x: next_x,
-            y: next_y,
-        };
-    };
-    let overlaps = next_x < task_x + task_width
-        && next_x + width > task_x
-        && next_y < task_y + task_height
-        && next_y + height > task_y;
-    if overlaps {
-        if horizontal {
-            next_y = task_y + (task_height - height) / 2;
-        } else {
-            next_x = task_x + (task_width - width) / 2;
-        }
     }
     FloatPosition {
         x: next_x,
@@ -1022,4 +1009,61 @@ fn number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_float_position, MonitorGeometry};
+    use crate::models::FloatPosition;
+
+    fn monitor_with_work_area(
+        work_x: i32,
+        work_y: i32,
+        work_width: i32,
+        work_height: i32,
+    ) -> MonitorGeometry {
+        MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            work_x,
+            work_y,
+            work_width,
+            work_height,
+        }
+    }
+
+    #[test]
+    fn floating_bar_stays_above_bottom_taskbar() {
+        let monitor = monitor_with_work_area(0, 0, 1920, 1040);
+        assert_eq!(
+            clamp_float_position(&[monitor], 900, 1060, 96, 30),
+            FloatPosition { x: 900, y: 1010 }
+        );
+    }
+
+    #[test]
+    fn floating_bar_stays_below_top_taskbar() {
+        let monitor = monitor_with_work_area(0, 40, 1920, 1040);
+        assert_eq!(
+            clamp_float_position(&[monitor], 900, 0, 96, 30),
+            FloatPosition { x: 900, y: 40 }
+        );
+    }
+
+    #[test]
+    fn floating_bar_stays_clear_of_side_taskbars() {
+        let left = monitor_with_work_area(48, 0, 1872, 1080);
+        assert_eq!(
+            clamp_float_position(&[left], 0, 500, 96, 30),
+            FloatPosition { x: 48, y: 500 }
+        );
+
+        let right = monitor_with_work_area(0, 0, 1872, 1080);
+        assert_eq!(
+            clamp_float_position(&[right], 1900, 500, 96, 30),
+            FloatPosition { x: 1776, y: 500 }
+        );
+    }
 }

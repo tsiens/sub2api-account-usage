@@ -1,6 +1,6 @@
-use std::mem::size_of;
+use std::{mem::size_of, os::windows::ffi::OsStrExt};
 use windows_sys::Win32::{
-    Foundation::{POINT, RECT},
+    Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, POINT, RECT},
     Graphics::{
         Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
         Gdi::{
@@ -8,12 +8,119 @@ use windows_sys::Win32::{
             MONITOR_DEFAULTTONEAREST,
         },
     },
-    System::SystemInformation::GetTickCount64,
+    System::{
+        Registry::{
+            RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ,
+            RRF_RT_REG_SZ,
+        },
+        SystemInformation::GetTickCount64,
+    },
     UI::{
         Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
         WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect},
     },
 };
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "Sub2API Account Usage";
+
+pub fn startup_enabled() -> Result<bool, String> {
+    let expected = startup_command()?;
+    let Some(value) = read_registry_string(RUN_KEY, RUN_VALUE)? else {
+        return Ok(false);
+    };
+    Ok(value == expected)
+}
+
+pub fn set_startup_enabled(enabled: bool) -> Result<(), String> {
+    let key = wide(RUN_KEY);
+    let name = wide(RUN_VALUE);
+    let status = if enabled {
+        let command = wide(&startup_command()?);
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                name.as_ptr(),
+                REG_SZ,
+                command.as_ptr().cast(),
+                (command.len() * size_of::<u16>()) as u32,
+            )
+        }
+    } else {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) }
+    };
+    if status == ERROR_SUCCESS || (!enabled && status == ERROR_FILE_NOT_FOUND) {
+        Ok(())
+    } else {
+        Err(format!(
+            "修改开机自启动失败：{}",
+            std::io::Error::from_raw_os_error(status as i32)
+        ))
+    }
+}
+
+fn startup_command() -> Result<String, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法获取应用程序路径：{error}"))?;
+    Ok(format!("\"{}\"", executable.display()))
+}
+
+fn read_registry_string(key: &str, name: &str) -> Result<Option<String>, String> {
+    let key = wide(key);
+    let name = wide(name);
+    let mut byte_count = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut byte_count,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(format!(
+            "读取开机自启动失败：{}",
+            std::io::Error::from_raw_os_error(status as i32)
+        ));
+    }
+    let mut value = vec![0u16; (byte_count as usize).div_ceil(size_of::<u16>())];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            value.as_mut_ptr().cast(),
+            &mut byte_count,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(format!(
+            "读取开机自启动失败：{}",
+            std::io::Error::from_raw_os_error(status as i32)
+        ));
+    }
+    let length = value
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(value.len());
+    Ok(Some(String::from_utf16_lossy(&value[..length])))
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
+}
 
 pub fn idle_seconds() -> u64 {
     let mut input = LASTINPUTINFO {
