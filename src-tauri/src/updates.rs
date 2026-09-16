@@ -46,6 +46,7 @@ pub struct UpdateManager {
     running: AtomicBool,
     cancel: AtomicBool,
     cancel_tx: tokio::sync::watch::Sender<bool>,
+    finished: tokio::sync::Notify,
 }
 
 impl UpdateManager {
@@ -57,6 +58,7 @@ impl UpdateManager {
             running: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             cancel_tx,
+            finished: tokio::sync::Notify::new(),
         })
     }
 
@@ -96,7 +98,6 @@ impl UpdateManager {
                 _ = wait_for_cancel(&mut cancel_rx) => Err("cancelled".into()),
                 result = &mut work => result,
             };
-            manager.running.store(false, Ordering::SeqCst);
             if let Err(error) = result {
                 if manager.cancel.load(Ordering::SeqCst) {
                     manager.finish_cancel(&app).await;
@@ -115,6 +116,10 @@ impl UpdateManager {
                     }
                 }
             }
+            // Keep the manager busy until cancellation cleanup has completed. This
+            // prevents a new check from racing with the old task's final state update.
+            manager.running.store(false, Ordering::SeqCst);
+            manager.finished.notify_waiters();
         });
     }
 
@@ -129,7 +134,20 @@ impl UpdateManager {
                 ..self.state()
             },
         );
-        if !self.running.load(Ordering::SeqCst) {
+        if self.running.load(Ordering::SeqCst) {
+            // The caller must not be allowed to start another update until the
+            // cancelled task has released the file and removed its cache.
+            while self.running.load(Ordering::SeqCst) {
+                let finished = self.finished.notified();
+                tokio::select! {
+                    _ = finished => {}
+                    // Notify registration and the task's final store cannot be
+                    // made one atomic operation, so keep a bounded state check
+                    // as a fallback for that tiny race window.
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                }
+            }
+        } else {
             self.finish_cancel(app).await;
         }
     }
