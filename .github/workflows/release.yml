@@ -86,6 +86,10 @@ jobs:
           if ($assets.Count -eq 0) {
             throw 'No Windows build assets were found in release'
           }
+          # actions/checkout overwrites the tag ref with a direct ref to the commit, which
+          # hides the annotated tag object. Fetch it back before reading the release notes.
+          $tagRef = "refs/tags/${env:GITHUB_REF_NAME}:refs/tags/${env:GITHUB_REF_NAME}"
+          git fetch --force --no-tags origin $tagRef 2>$null
           $tagType = git cat-file -t $env:GITHUB_REF_NAME
           if ($tagType -ne 'tag') {
             throw "Release tag $env:GITHUB_REF_NAME must be an annotated tag with release notes"
