@@ -96,6 +96,10 @@ label small { display: block; margin-top: 5px; color: #6f7b89; font-size: 11px; 
 .compact { gap: 8px; }
 .compact input { margin-top: 0; }
 .logs-section p { margin: 0; color: var(--muted); line-height: 1.5; }
+.log-open-button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding: 8px 10px; border: 1px solid rgba(148, 163, 184, .22); border-radius: 5px; background: rgba(23, 27, 33, .78); color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.log-open-button:hover { border-color: var(--accent); color: var(--text); }
+.log-open-button code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-open-button span { flex: 0 0 auto; color: var(--accent); }
 code { color: var(--accent); }
 .stats-summary { gap: 28px; margin: -4px 0 16px 40px; color: var(--muted); }
 .stats-summary strong { display: block; margin-top: 3px; color: var(--text); font-size: 16px; }

@@ -1,6 +1,6 @@
 # Sub2API 账户用量
 
-Windows 11 系统托盘中的 Sub2API 管理员账户用量监控工具。
+Windows 10/11 系统托盘中的 Sub2API 管理员账户用量监控工具。
 
 <p align="center"><img src="image/README/float-bar.png" alt="半透明悬浮条"></p>
 <p align="center"><img src="image/README/usage-panel.png" alt="账户用量面板"></p>
@@ -16,8 +16,8 @@ Windows 11 系统托盘中的 Sub2API 管理员账户用量监控工具。
 
 ## 半透明悬浮条
 
-- 可在设置中开启或关闭。
-- 固定为 90 × 30 像素，显示账户厂家图标、5 小时已用比例和 7 天已用比例。
+- 可在开启或关闭置顶。
+- 按“5 小时已用比例、厂家图标、7 天已用比例”显示。
 - 使用 LobeHub Icons 提供的黑白厂家图标，无法识别厂家时显示 OpenAI 图标。
 - 默认背景完全透明，鼠标悬浮时显示 50% 半透明背景。
 - 自动检测悬浮条附近的背景亮度，在黑色和白色图标文字之间切换。
@@ -46,16 +46,16 @@ Windows 11 系统托盘中的 Sub2API 管理员账户用量监控工具。
 ## 自动更新
 
 - 默认从 `https://github.com/tsiens/sub2api-account-usage` 检查新版本。
-- 可以在设置中替换为其他 GitHub 仓库地址、`ghproxy` 前缀地址（例如 `https://ghproxy.net/https://github.com/owner/repo`），或包含 `latest.yml` 的更新地址。
+- 可以在设置中替换为其他 GitHub 仓库地址、`ghproxy` 前缀地址（例如 `https://ghproxy.net/https://github.com/owner/repo`），或提供 `latest.json` 的自定义更新地址。
 - 托盘图标右键菜单提供“检查更新”，可随时手动检查新版本。
 - 程序启动时和运行期间会自动检查更新。
 - 发现新版本后自动下载，下载完成后可选择立即重启安装或稍后安装。
 
 ## 数据安全
 
-- 登录凭据保存在 Windows 系统保护的安全存储中。
+- 登录凭据使用 Windows DPAPI 加密后保存在当前用户配置中。
 - 管理员密码不会以明文保存。
-- 配置和日志保存在 Windows 用户数据目录的 `sub2api-account-usage` 文件夹中。
+- 配置和日志保存在安装目录中。
 
 ## 许可证
 

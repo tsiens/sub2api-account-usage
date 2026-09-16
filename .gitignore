@@ -1,8 +1,19 @@
 # Dependencies / tooling
 node_modules/
+src-tauri/target/
+src-tauri/gen/schemas/
 release/
 release-*/
 dist/
+
+# Native build byproducts
+*.pdb
+*.ilk
+*.tmp
+*.exe
+*.msi
+*.msix
+*.blockmap
 
 # VS Code extension packages
 *.vsix

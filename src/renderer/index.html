@@ -31,7 +31,7 @@
         <div class="section-heading"><div><span class="eyebrow">应用设置</span><h2>连接与刷新</h2></div></div>
         <form id="configForm" class="form-stack">
           <label>服务器地址<input id="baseUrl" type="url" placeholder="https://sub2api.example.com" autocomplete="url"><small>填写服务根地址，不要追加 /api/v1。</small></label>
-          <label>更新地址<input id="updateUrl" type="url" placeholder="https://github.com/tsiens/sub2api-account-usage" autocomplete="url"><small>支持 GitHub 仓库、ghproxy 前缀，或包含 latest.yml 的更新目录。</small></label>
+          <label>更新地址<input id="updateUrl" type="url" placeholder="https://github.com/tsiens/sub2api-account-usage" autocomplete="url"><small>支持 GitHub 仓库、ghproxy 前缀，或提供 latest.json 的更新目录。</small></label>
           <div class="form-grid"><label>自动刷新（秒）<input id="updateInterval" type="number" min="30" step="1"></label><label>账户切换（秒）<input id="rotationInterval" type="number" min="1" step="1"></label></div>
           <div class="form-grid"><label>请求超时（毫秒）<input id="requestTimeout" type="number" min="1000" step="100"></label><label class="checkbox-label"><input id="allowInsecureTls" type="checkbox"><span>允许无效 TLS 证书</span></label></div>
           <label class="checkbox-label"><input id="showFloatingBar" type="checkbox"><span>常驻显示置顶半透明悬浮条</span></label>
@@ -45,7 +45,7 @@
           <div id="totpBox" class="form-stack compact" hidden><input id="totpCode" inputmode="numeric" maxlength="6" placeholder="6 位 TOTP 验证码"><button class="secondary-button" id="totpButton">完成两步验证</button></div>
           <button class="danger-button" id="logoutButton" type="button">清除本地鉴权</button>
         </div>
-        <div class="settings-section logs-section"><div class="section-label"><span>本地日志</span></div><p>日志文件位于应用数据目录中的 <code>app.log</code>。</p></div>
+        <div class="settings-section logs-section"><div class="section-label"><span>本地日志</span></div><p>日志文件位于应用安装目录：</p><button type="button" class="log-open-button" id="openLogButton"><code id="logDirectory">app.log</code><span>点击打开</span></button></div>
       </section>
 
       <section id="statsView" class="view stats-view">
@@ -56,7 +56,8 @@
     </main>
     <div class="toast" id="toast" hidden></div>
   </div>
-  <script src="../../media/chart.umd.min.js"></script>
+  <script src="./bridge.js"></script>
+  <script src="./media/chart.umd.min.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

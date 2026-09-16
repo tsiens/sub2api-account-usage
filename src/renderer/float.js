@@ -4,6 +4,9 @@ const track = document.getElementById('marqueeTrack');
 const shell = document.getElementById('floatShell');
 let dragState;
 let suppressClick = false;
+let pendingDx = 0;
+let pendingDy = 0;
+let moveFrame = 0;
 let rotationTimer;
 let rotationIndex = 0;
 const icons = {
@@ -24,7 +27,7 @@ function used(value) {
 
 function providerIcon(account) {
   const key = String(account?.platform || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
-  return icons[key] || '•';
+  return icons[key] || 'openai';
 }
 
 function renderProviderIcon(icon) {
@@ -40,16 +43,17 @@ function render(state) {
       const seven = used(item.usage?.seven_day?.utilization);
       return {
         icon: providerIcon(item.account),
-        usage: `${five}%·${seven}%`
+        five: `${five}%`,
+        seven: `${seven}%`
       };
     })
-    : [{ icon: '•', usage: '--%·--%' }];
+    : [{ icon: 'openai', five: '--%', seven: '--%' }];
   clearInterval(rotationTimer);
   rotationIndex = 0;
   track.style.transition = 'none';
   track.style.transform = 'translateY(0)';
   const slides = values.length > 1 ? [...values, values[0]] : values;
-  track.innerHTML = slides.map((value, index) => `<span class="marquee-item"${index === values.length ? ' aria-hidden="true"' : ''}><i class="provider-icon">${renderProviderIcon(value.icon)}</i><strong class="usage-values">${escapeHtml(value.usage)}</strong></span>`).join('');
+  track.innerHTML = slides.map((value, index) => `<span class="marquee-item"${index === values.length ? ' aria-hidden="true"' : ''}><strong class="usage-value usage-five">${escapeHtml(value.five)}</strong><i class="provider-icon">${renderProviderIcon(value.icon)}</i><strong class="usage-value usage-seven">${escapeHtml(value.seven)}</strong></span>`).join('');
   if (values.length > 1) {
     const interval = Math.max(1000, Number(state.config?.rotationInterval) * 1000 || 5000);
     rotationTimer = setInterval(advanceAccount, interval);
@@ -79,30 +83,60 @@ shell.addEventListener('pointerdown', (event) => {
     y: event.screenY,
     moved: false
   };
+  pendingDx = 0;
+  pendingDy = 0;
+  window.sub2api.beginFloatDrag();
   shell.classList.add('dragging');
   shell.setPointerCapture?.(event.pointerId);
 });
 
+// Coalesce pointer events into one window move per frame: dragging a native window is
+// expensive enough that sending every raw event just queues work up behind the cursor.
+function flushMove() {
+  moveFrame = 0;
+  if (!pendingDx && !pendingDy) return;
+  const dx = pendingDx;
+  const dy = pendingDy;
+  pendingDx = 0;
+  pendingDy = 0;
+  void window.sub2api.moveFloat({ dx, dy }).catch(() => {});
+}
+
 shell.addEventListener('pointermove', (event) => {
   if (!dragState || event.pointerId !== dragState.pointerId || !event.buttons) return;
-  const dx = event.screenX - dragState.x;
-  const dy = event.screenY - dragState.y;
-  if (!dx && !dy) return;
-  if (Math.abs(event.screenX - dragState.startX) > 3 || Math.abs(event.screenY - dragState.startY) > 3) {
-    dragState.moved = true;
-  }
+  pendingDx += event.screenX - dragState.x;
+  pendingDy += event.screenY - dragState.y;
   dragState.x = event.screenX;
   dragState.y = event.screenY;
-  window.sub2api.moveFloat({ dx, dy });
+  if (!dragState.moved && (Math.abs(event.screenX - dragState.startX) > 3 || Math.abs(event.screenY - dragState.startY) > 3)) {
+    dragState.moved = true;
+  }
+  if (!moveFrame) moveFrame = window.requestAnimationFrame(flushMove);
   event.preventDefault();
 });
 
 function finishDrag(event) {
   if (!dragState || (event && event.pointerId !== dragState.pointerId)) return;
-  suppressClick = dragState.moved;
+  if (moveFrame) window.cancelAnimationFrame(moveFrame);
+  moveFrame = 0;
+  const dx = pendingDx;
+  const dy = pendingDy;
+  pendingDx = 0;
+  pendingDy = 0;
+  const moved = dragState.moved;
+  suppressClick = moved;
   shell.classList.remove('dragging');
   shell.releasePointerCapture?.(dragState.pointerId);
   dragState = undefined;
+  if (!moved) return;
+  // Apply the last partial movement first, then let the backend snap and persist the
+  // final position, so releasing the bar never jumps back by one frame.
+  void (async () => {
+    try {
+      if (dx || dy) await window.sub2api.moveFloat({ dx, dy });
+      await window.sub2api.endFloatDrag();
+    } catch { /* Dragging must never surface an error to the user. */ }
+  })();
 }
 
 shell.addEventListener('pointerup', finishDrag);

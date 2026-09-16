@@ -1,7 +1,7 @@
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font: 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
-.float-shell { width: 90px; height: 30px; display: flex; align-items: center; gap: 0; padding: 0 1px; border: 0; border-radius: 4px; outline: none; appearance: none; background: transparent; color: #fff; cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
+.float-shell { width: 96px; height: 30px; display: flex; align-items: center; gap: 0; padding: 0; border: 0; border-radius: 4px; outline: none; appearance: none; background: transparent; color: #fff; cursor: grab; user-select: none; font: 600 15px "Segoe UI", "Microsoft YaHei", sans-serif; }
 .float-shell.theme-light { color: #000; }
 .float-shell.theme-dark { color: #fff; }
 .float-shell:hover { background: rgba(0, 0, 0, .5); }
@@ -9,8 +9,10 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background:
 .float-shell.dragging { cursor: grabbing; }
 .marquee-viewport { display: block; flex: 1 1 auto; min-width: 0; width: 100%; height: 30px; overflow: hidden; white-space: nowrap; }
 .marquee-track { display: flex; flex-direction: column; min-width: 0; width: 100%; transform: translateY(0); font: inherit; line-height: 1; }
-.marquee-item { width: 88px; min-width: 88px; height: 30px; min-height: 30px; display: flex; align-items: center; gap: 0; overflow: hidden; white-space: nowrap; }
+.marquee-item { width: 96px; min-width: 96px; height: 30px; min-height: 30px; display: grid; grid-template-columns: 42px 12px 42px; align-items: center; overflow: hidden; white-space: nowrap; }
 .provider-icon { display: grid; width: 12px; height: 12px; flex: 0 0 12px; place-items: center; font-style: normal; text-align: center; }
 .provider-logo { display: block; width: 12px; height: 12px; filter: invert(1); }
 .float-shell.theme-light .provider-logo { filter: none; }
-.usage-values { width: 76px; flex: 0 0 76px; color: inherit; font: inherit; text-align: right; white-space: nowrap; }
+.usage-value { width: 42px; color: inherit; font: inherit; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-five { text-align: right; padding-right: 1px; }
+.usage-seven { text-align: left; padding-left: 1px; }

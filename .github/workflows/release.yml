@@ -23,6 +23,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Verify tag matches package version
         shell: pwsh
         run: |
@@ -30,6 +40,14 @@ jobs:
           $packageVersion = node -p "require('./package.json').version"
           if ($tagVersion -ne $packageVersion) {
             throw "Tag version $tagVersion does not match package.json version $packageVersion"
+          }
+          $tauriVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($tagVersion -ne $tauriVersion) {
+            throw "Tag version $tagVersion does not match src-tauri/tauri.conf.json version $tauriVersion"
+          }
+          $cargoVersion = (Select-String -LiteralPath 'src-tauri/Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($tagVersion -ne $cargoVersion) {
+            throw "Tag version $tagVersion does not match src-tauri/Cargo.toml version $cargoVersion"
           }
 
       - name: Install dependencies
@@ -39,20 +57,32 @@ jobs:
         run: npm run check
 
       - name: Build Windows installer
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npm run dist:win -- --config.directories.output=release --publish never
+        run: npm run dist:win
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $installer = Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'No Tauri NSIS installer was found'
+          }
+          New-Item -ItemType Directory -Path 'release' -Force | Out-Null
+          $target = "release/Sub2API.Setup.$version.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $target
+          $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$target.sha256" -Value "$hash  $(Split-Path $target -Leaf)" -Encoding ascii
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $assets = @(
-            Get-ChildItem -LiteralPath 'release' -File -ErrorAction SilentlyContinue | Where-Object {
-              $_.Extension -in @('.exe', '.blockmap') -or $_.Name -eq 'latest.yml'
-            } | ForEach-Object { $_.FullName }
-          )
+          $assets = @(Get-ChildItem -LiteralPath 'release' -File | Where-Object {
+            $_.Name -match '^Sub2API\.Setup\.[0-9]+\.[0-9]+\.[0-9]+\.exe(?:\.sha256)?$'
+          } | ForEach-Object { $_.FullName })
           if ($assets.Count -eq 0) {
             throw 'No Windows build assets were found in release'
           }
@@ -69,6 +99,15 @@ jobs:
           $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
           if ($LASTEXITCODE -eq 0 -and $releaseId) {
             gh release edit $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --notes $releaseNotes
+            $version = node -p "require('./package.json').version"
+            $expected = @("Sub2API.Setup.$version.exe", "Sub2API.Setup.$version.exe.sha256")
+            $existing = @(gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name')
+            foreach ($name in $existing) {
+              if ($name -and $expected -notcontains $name) {
+                Write-Host "Removing stale asset: $name"
+                gh release delete-asset $env:GITHUB_REF_NAME $name --yes
+              }
+            }
             gh release upload $env:GITHUB_REF_NAME $assets --clobber
           } else {
             gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --notes $releaseNotes

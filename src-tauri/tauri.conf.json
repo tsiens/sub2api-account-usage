@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sub2API 账户用量",
+  "version": "1.1.0",
+  "identifier": "com.tsiens.sub2api-account-usage",
+  "build": {
+    "frontendDist": "../src/renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sub2API 账户用量",
+        "url": "index.html",
+        "width": 440,
+        "height": 650,
+        "minWidth": 380,
+        "minHeight": 500,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": true,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      },
+      {
+        "label": "float",
+        "title": "Sub2API 账户余量",
+        "url": "float.html",
+        "width": 96,
+        "height": 30,
+        "visible": false,
+        "focus": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      },
+      {
+        "label": "update",
+        "title": "检查更新",
+        "url": "update.html",
+        "width": 410,
+        "height": 260,
+        "minWidth": 410,
+        "minHeight": 260,
+        "maxWidth": 410,
+        "maxHeight": 260,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

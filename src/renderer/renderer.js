@@ -148,7 +148,7 @@ async function openStats(accountId, accountName) {
 async function saveConfig(event) {
   event.preventDefault();
   try {
-    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: $('updateInterval').value, rotationInterval: $('rotationInterval').value, requestTimeout: $('requestTimeout').value, allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
+    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: Number($('updateInterval').value), rotationInterval: Number($('rotationInterval').value), requestTimeout: Number($('requestTimeout').value), allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
     toast('连接设置已保存');
   } catch (error) { toast(error.message || '保存失败'); }
 }
@@ -190,6 +190,13 @@ $('apiKeyForm').addEventListener('submit', saveApiKey);
 $('loginForm').addEventListener('submit', login);
 $('totpButton').addEventListener('click', complete2fa);
 $('logoutButton').addEventListener('click', logout);
+$('openLogButton').addEventListener('click', async () => {
+  try { await window.sub2api.openLog(); }
+  catch (error) { toast(error.message || '打开日志失败'); }
+});
+window.sub2api.getDataDirectory()
+  .then((directory) => { $('logDirectory').textContent = `${directory}\\app.log`; })
+  .catch(() => {});
 window.sub2api.onState(render);
 window.sub2api.onNavigate(({ view, focus }) => { switchView(view); if (focus === 'server') $('baseUrl').focus(); if (focus === 'auth') $('apiKey').focus(); });
 window.setInterval(() => { if (appState) render(appState); }, 1000);
