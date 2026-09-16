@@ -1,9 +1,12 @@
 use std::mem::size_of;
 use windows_sys::Win32::{
     Foundation::{POINT, RECT},
-    Graphics::Gdi::{
-        GetDC, GetMonitorInfoW, GetPixel, MonitorFromWindow, ReleaseDC, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST,
+    Graphics::{
+        Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
+        Gdi::{
+            GetDC, GetMonitorInfoW, GetPixel, MonitorFromWindow, ReleaseDC, MONITORINFO,
+            MONITOR_DEFAULTTONEAREST,
+        },
     },
     System::SystemInformation::GetTickCount64,
     UI::{
@@ -42,6 +45,18 @@ pub fn foreground_is_fullscreen() -> bool {
     if unsafe { GetWindowRect(window, &mut window_rect) } == 0 {
         return false;
     }
+    let mut visible_rect = RECT::default();
+    if unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            (&mut visible_rect as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        )
+    } == 0
+    {
+        window_rect = visible_rect;
+    }
     let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
     if monitor.is_null() {
         return false;
@@ -55,10 +70,15 @@ pub fn foreground_is_fullscreen() -> bool {
     if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
         return false;
     }
-    window_rect.left == info.rcMonitor.left
-        && window_rect.top == info.rcMonitor.top
-        && window_rect.right == info.rcMonitor.right
-        && window_rect.bottom == info.rcMonitor.bottom
+    rect_covers_monitor(&window_rect, &info.rcMonitor)
+}
+
+fn rect_covers_monitor(window: &RECT, monitor: &RECT) -> bool {
+    const TOLERANCE: i32 = 2;
+    (window.left - monitor.left).abs() <= TOLERANCE
+        && (window.top - monitor.top).abs() <= TOLERANCE
+        && (window.right - monitor.right).abs() <= TOLERANCE
+        && (window.bottom - monitor.bottom).abs() <= TOLERANCE
 }
 
 pub fn background_theme(x: i32, y: i32, width: i32, height: i32) -> Option<&'static str> {
@@ -114,4 +134,38 @@ pub fn background_theme(x: i32, y: i32, width: i32, height: i32) -> Option<&'sta
         + (green / count) as f64 * 0.587
         + (blue / count) as f64 * 0.114;
     Some(if luminance >= 160.0 { "light" } else { "dark" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rect_covers_monitor;
+    use windows_sys::Win32::Foundation::RECT;
+
+    #[test]
+    fn fullscreen_comparison_allows_small_frame_rounding_only() {
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(rect_covers_monitor(
+            &RECT {
+                left: -1,
+                top: 0,
+                right: 1921,
+                bottom: 1080,
+            },
+            &monitor
+        ));
+        assert!(!rect_covers_monitor(
+            &RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1040,
+            },
+            &monitor
+        ));
+    }
 }

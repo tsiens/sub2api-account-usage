@@ -1,13 +1,14 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-let appState = null;
 let pending2fa = null;
 let chart = null;
 let activeView = 'dashboard';
 let lastConfigKey = '';
+let lastAccountsKey = '';
+let statsRequest = 0;
 
-const icons = { openai: '◉', claude: '◆', 'google-gemini': '✦', xai: '×', kimi: 'K', copilot: '●', sparkle: '•' };
+const icons = { openai: '◉', gpt: '◉', chatgpt: '◉', claude: '◆', anthropic: '◆', 'google-gemini': '✦', google: '✦', gemini: '✦', xai: '×', grok: '×', kimi: 'K', moonshot: 'K', copilot: '●', github: '●', sparkle: '•' };
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -33,7 +34,7 @@ function countdown(value) {
   const minutes = Math.floor((seconds % 3600) / 60);
   if (days) return `${days}天${hours}时`;
   if (hours) return `${hours}时${minutes}分`;
-  return `${minutes}分${seconds % 60}秒`;
+  return minutes ? `${minutes}分${seconds % 60}秒` : `${seconds % 60}秒`;
 }
 function provider(account) {
   const key = String(account?.platform || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
@@ -42,7 +43,6 @@ function provider(account) {
 function level(value) { return Number(value) >= 95 ? 'error' : Number(value) >= 80 ? 'warn' : ''; }
 
 function render(state) {
-  appState = state;
   const accounts = state.accounts || [];
   const statusTitle = $('statusTitle');
   const dot = $('statusDot');
@@ -55,8 +55,13 @@ function render(state) {
   dot.className = `status-dot ${state.status === 'error' ? 'error' : state.status === 'ready' && accounts.some((item) => Math.max(Number(item.usage?.five_hour?.utilization) || 0, Number(item.usage?.seven_day?.utilization) || 0) >= 95) ? 'warn' : ''}`;
   notice.hidden = !(state.message && (state.status !== 'ready' || state.failed?.length));
   notice.textContent = state.failed?.length ? `${state.message || ''} ${state.failed.map((item) => `${item.accountName}: ${item.error}`).join('；')}` : (state.message || '');
-  list.innerHTML = accounts.map((result) => accountCard(result)).join('');
-  list.querySelectorAll('[data-account-id]').forEach((button) => button.addEventListener('click', () => openStats(button.dataset.accountId, button.dataset.accountName)));
+  const accountsKey = JSON.stringify(accounts);
+  if (accountsKey !== lastAccountsKey) {
+    list.innerHTML = accounts.map((result) => accountCard(result)).join('');
+    list.querySelectorAll('[data-account-id]').forEach((button) => button.addEventListener('click', () => openStats(button.dataset.accountId, button.dataset.accountName)));
+    lastAccountsKey = accountsKey;
+  }
+  updateCountdowns();
   empty.hidden = accounts.length > 0;
   if (!accounts.length) {
     $('emptyTitle').textContent = state.status === 'needs-server' ? '还没有连接服务器' : state.status === 'needs-auth' ? '还没有配置鉴权' : '暂无账户用量';
@@ -86,7 +91,15 @@ function quota(label, item) {
   const reset = countdown(item?.resets_at);
   const windowStats = item?.window_stats || {};
   const status = level(value);
-  return `<div class="quota"><div class="quota-row"><span>${label}${reset ? ` <small>${reset}</small>` : ''}</span><strong class="${value >= 100 ? 'full' : ''}">${pct(value)}</strong></div><div class="progress"><i class="${status}" style="width:${value}%"></i></div><div class="quota-meta"><span>${integer(windowStats.requests)} req · ${token(windowStats.tokens)} tok</span><span>重置 ${escapeHtml(formatTime(item?.resets_at))}</span></div></div>`;
+  return `<div class="quota"><div class="quota-row"><span>${label} <small class="quota-countdown" data-reset-at="${escapeHtml(item?.resets_at || '')}"${reset ? '' : ' hidden'}>${escapeHtml(reset)}</small></span><strong class="${value >= 100 ? 'full' : ''}">${pct(value)}</strong></div><div class="progress"><i class="${status}" style="width:${value}%"></i></div><div class="quota-meta"><span>${integer(windowStats.requests)} req · ${token(windowStats.tokens)} tok</span><span>重置 ${escapeHtml(formatTime(item?.resets_at))}</span></div></div>`;
+}
+
+function updateCountdowns() {
+  document.querySelectorAll('.quota-countdown').forEach((element) => {
+    const value = countdown(element.dataset.resetAt);
+    element.textContent = value;
+    element.hidden = !value;
+  });
 }
 
 function formatTime(value) {
@@ -119,12 +132,14 @@ function toast(message) {
 }
 
 async function openStats(accountId, accountName) {
+  const request = ++statsRequest;
   switchView('stats');
   $('statsTitle').textContent = accountName || '使用趋势';
   $('chartMessage').textContent = '加载中…';
   $('chartMessage').hidden = false;
   try {
     const stats = await window.sub2api.getStats(accountId);
+    if (request !== statsRequest) return;
     $('totalRequests').textContent = integer(stats.totalRequests);
     $('totalTokens').textContent = token(stats.totalTokens);
     const history = stats.history || [];
@@ -141,6 +156,7 @@ async function openStats(accountId, accountName) {
     $('chartMessage').hidden = history.some((item) => item.requests || item.tokens);
     if (!history.some((item) => item.requests || item.tokens)) $('chartMessage').textContent = '该时间范围暂无使用数据';
   } catch (error) {
+    if (request !== statsRequest) return;
     $('chartMessage').textContent = error.message || '加载趋势失败';
   }
 }
@@ -163,24 +179,31 @@ async function login(event) {
   event.preventDefault();
   try {
     const result = await window.sub2api.login({ email: $('email').value.trim(), password: $('password').value });
-    if (result.requires2fa) { pending2fa = result; $('totpBox').hidden = false; toast('请输入 TOTP 验证码'); }
+    if (result.requires2fa) { pending2fa = result; $('password').value = ''; $('totpBox').hidden = false; toast('请输入 TOTP 验证码'); }
     else { $('password').value = ''; toast('登录成功'); }
   } catch (error) { toast(error.message || '登录失败'); }
 }
 
 async function complete2fa() {
   if (!pending2fa) return;
-  try { await window.sub2api.completeLogin({ tempToken: pending2fa.tempToken, totpCode: $('totpCode').value, email: pending2fa.email }); pending2fa = null; $('totpBox').hidden = true; toast('登录成功'); }
+  try { await window.sub2api.completeLogin({ tempToken: pending2fa.tempToken, totpCode: $('totpCode').value, email: pending2fa.email }); pending2fa = null; $('password').value = ''; $('totpCode').value = ''; $('totpBox').hidden = true; toast('登录成功'); }
   catch (error) { toast(error.message || '验证码错误'); }
 }
 
 async function logout() {
-  await window.sub2api.logout();
-  toast('本地鉴权已清除');
+  try {
+    await window.sub2api.logout();
+    $('password').value = '';
+    $('totpCode').value = '';
+    toast('本地鉴权已清除');
+  } catch (error) { toast(error.message || '清除鉴权失败'); }
 }
 
 document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
-$('refreshButton').addEventListener('click', async () => { await window.sub2api.refresh(); toast('刷新完成'); });
+$('refreshButton').addEventListener('click', async () => {
+  try { await window.sub2api.refresh(); toast('刷新完成'); }
+  catch (error) { toast(error.message || '刷新失败'); }
+});
 $('closeButton').addEventListener('click', () => window.sub2api.close());
 $('settingsShortcut').addEventListener('click', () => switchView('settings'));
 $('emptySettingsButton').addEventListener('click', () => switchView('settings'));
@@ -199,5 +222,5 @@ window.sub2api.getDataDirectory()
   .catch(() => {});
 window.sub2api.onState(render);
 window.sub2api.onNavigate(({ view, focus }) => { switchView(view); if (focus === 'server') $('baseUrl').focus(); if (focus === 'auth') $('apiKey').focus(); });
-window.setInterval(() => { if (appState) render(appState); }, 1000);
-window.sub2api.getState().then(render);
+window.setInterval(updateCountdowns, 1000);
+window.sub2api.getState().then(render).catch((error) => toast(error.message || '加载状态失败'));

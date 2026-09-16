@@ -18,10 +18,11 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 
+const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
-    body: Option<String>,
     assets: Vec<GithubAsset>,
 }
 
@@ -41,20 +42,21 @@ struct GenericRelease {
 
 pub struct UpdateManager {
     state: Mutex<UpdateUiState>,
-    available: Mutex<Option<AvailableUpdate>>,
     downloaded: Mutex<Option<PathBuf>>,
     running: AtomicBool,
     cancel: AtomicBool,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl UpdateManager {
     pub fn new() -> Arc<Self> {
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         Arc::new(Self {
             state: Mutex::new(UpdateUiState::default()),
-            available: Mutex::new(None),
             downloaded: Mutex::new(None),
             running: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            cancel_tx,
         })
     }
 
@@ -71,6 +73,8 @@ impl UpdateManager {
             return;
         }
         self.cancel.store(false, Ordering::SeqCst);
+        let _ = self.cancel_tx.send(false);
+        *self.downloaded.lock().expect("downloaded path poisoned") = None;
         if manual {
             show_window(&app);
         }
@@ -83,8 +87,15 @@ impl UpdateManager {
             },
         );
         let manager = self.clone();
+        let mut cancel_rx = self.cancel_tx.subscribe();
         tauri::async_runtime::spawn(async move {
-            let result = manager.check_and_download(&app, &update_url).await;
+            let work = manager.check_and_download(&app, &update_url);
+            tokio::pin!(work);
+            let result = tokio::select! {
+                biased;
+                _ = wait_for_cancel(&mut cancel_rx) => Err("cancelled".into()),
+                result = &mut work => result,
+            };
             manager.running.store(false, Ordering::SeqCst);
             if let Err(error) = result {
                 if manager.cancel.load(Ordering::SeqCst) {
@@ -109,6 +120,7 @@ impl UpdateManager {
 
     pub async fn cancel(&self, app: &AppHandle) {
         self.cancel.store(true, Ordering::SeqCst);
+        let _ = self.cancel_tx.send(true);
         self.set_state(
             app,
             UpdateUiState {
@@ -162,11 +174,11 @@ impl UpdateManager {
             );
             return Ok(());
         }
-        *self.available.lock().expect("available update poisoned") = Some(available.clone());
         self.download(app, &available).await
     }
 
     async fn download(&self, app: &AppHandle, update: &AvailableUpdate) -> Result<(), String> {
+        validate_network_url(&update.download_url)?;
         let cache = updater_cache_directory()?;
         clear_directory(&cache).await?;
         tokio::fs::create_dir_all(&cache)
@@ -180,16 +192,18 @@ impl UpdateManager {
             .filter(|value| value.to_lowercase().ends_with(".exe"))
             .unwrap_or("Sub2API.Setup.exe");
         let destination = cache.join(name);
-        let response = reqwest::Client::new()
+        let response = update_client()?
             .get(&update.download_url)
             .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
             .send()
             .await
+            .map_err(|error| format!("下载更新失败：{error}"))?
+            .error_for_status()
             .map_err(|error| format!("下载更新失败：{error}"))?;
-        if !response.status().is_success() {
-            return Err(format!("下载更新失败：HTTP {}", response.status().as_u16()));
-        }
         let total = response.content_length().unwrap_or(0);
+        if total > MAX_UPDATE_BYTES {
+            return Err("更新文件超过 512 MB 安全限制。".into());
+        }
         let mut file = tokio::fs::File::create(&destination)
             .await
             .map_err(|error| format!("创建更新文件失败：{error}"))?;
@@ -208,10 +222,10 @@ impl UpdateManager {
             },
         );
         while let Some(chunk) = stream.next().await {
-            if self.cancel.load(Ordering::SeqCst) {
-                return Err("cancelled".into());
-            }
             let chunk = chunk.map_err(|error| format!("下载更新失败：{error}"))?;
+            if transferred.saturating_add(chunk.len() as u64) > MAX_UPDATE_BYTES {
+                return Err("更新文件超过 512 MB 安全限制。".into());
+            }
             file.write_all(&chunk)
                 .await
                 .map_err(|error| format!("写入更新文件失败：{error}"))?;
@@ -238,12 +252,10 @@ impl UpdateManager {
         file.flush()
             .await
             .map_err(|error| format!("保存更新文件失败：{error}"))?;
-        if let Some(expected) = update.sha256.as_deref().filter(|value| !value.is_empty()) {
-            let actual = format!("{:x}", hasher.finalize());
-            if !actual.eq_ignore_ascii_case(expected.trim()) {
-                let _ = tokio::fs::remove_file(&destination).await;
-                return Err("更新文件 SHA-256 校验失败。".into());
-            }
+        let actual = format!("{:x}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(update.sha256.trim()) {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err("更新文件 SHA-256 校验失败。".into());
         }
         *self.downloaded.lock().expect("downloaded path poisoned") = Some(destination);
         self.set_state(
@@ -294,13 +306,14 @@ async fn resolve_update(source: &str) -> Result<AvailableUpdate, String> {
     } else {
         source
     };
+    validate_network_url(source)?;
     if let Some((proxy, owner, repository)) = parse_github_source(source) {
         // Version check and download both go through the address the user configured:
         // a ghproxy prefix is applied to the API call as well, and a plain GitHub URL
         // stays direct.
         let api_url =
             format!("{proxy}https://api.github.com/repos/{owner}/{repository}/releases/latest");
-        let response = reqwest::Client::new()
+        let response = update_client()?
             .get(&api_url)
             .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
             .send()
@@ -325,7 +338,7 @@ async fn resolve_update(source: &str) -> Result<AvailableUpdate, String> {
                 (name.contains("setup"), !name.contains("portable"))
             })
             .ok_or_else(|| "最新 Release 中没有 Windows 安装程序。".to_string())?;
-        let digest = fetch_digest(&release, asset, &proxy).await;
+        let digest = fetch_digest(&release, asset, &proxy).await?;
         let url = if proxy.is_empty() {
             asset.browser_download_url.clone()
         } else {
@@ -356,7 +369,12 @@ async fn resolve_update(source: &str) -> Result<AvailableUpdate, String> {
     Ok(AvailableUpdate {
         version: release.version.trim_start_matches('v').into(),
         download_url: release.download_url,
-        sha256: release.sha256,
+        sha256: release
+            .sha256
+            .as_deref()
+            .and_then(normalized_digest)
+            .map(str::to_string)
+            .ok_or_else(|| "更新元数据缺少有效的 SHA-256 摘要。".to_string())?,
     })
 }
 
@@ -381,27 +399,82 @@ async fn fetch_digest(
     release: &GithubRelease,
     executable: &GithubAsset,
     proxy: &str,
-) -> Option<String> {
-    let checksum = release.assets.iter().find(|asset| {
-        asset
-            .name
-            .eq_ignore_ascii_case(&format!("{}.sha256", executable.name))
-    })?;
-    let text = reqwest::Client::new()
+) -> Result<String, String> {
+    let checksum = release
+        .assets
+        .iter()
+        .find(|asset| {
+            asset
+                .name
+                .eq_ignore_ascii_case(&format!("{}.sha256", executable.name))
+        })
+        .ok_or_else(|| "GitHub Release 缺少安装包 SHA-256 摘要文件。".to_string())?;
+    let text = update_client()?
         .get(format!("{proxy}{}", checksum.browser_download_url))
         .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
         .send()
         .await
-        .ok()?
+        .map_err(|error| format!("下载更新摘要失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("下载更新摘要失败：{error}"))?
         .text()
         .await
-        .ok()?;
-    normalized_digest(&text).map(str::to_string).or_else(|| {
-        release
-            .body
-            .as_deref()
-            .and_then(|body| normalized_digest(body).map(str::to_string))
-    })
+        .map_err(|error| format!("读取更新摘要失败：{error}"))?;
+    normalized_digest(&text)
+        .map(str::to_string)
+        .ok_or_else(|| "更新摘要文件格式无效。".to_string())
+}
+
+fn update_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("更新请求重定向次数过多")
+            } else if network_url_is_safe(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("更新请求被重定向到不安全地址")
+            }
+        }))
+        .build()
+        .map_err(|error| format!("创建更新网络客户端失败：{error}"))
+}
+
+fn validate_network_url(value: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "更新网络地址无效。".to_string())?;
+    if network_url_is_safe(&url) {
+        Ok(())
+    } else {
+        Err("更新网络地址必须使用 HTTPS；仅本机地址允许 HTTP。".into())
+    }
+}
+
+fn network_url_is_allowed(url: &reqwest::Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    url.scheme() == "http"
+        && matches!(
+            url.host_str().map(|host| host.to_ascii_lowercase()),
+            Some(host) if host == "localhost" || host == "127.0.0.1" || host == "::1"
+        )
+}
+
+fn network_url_is_safe(url: &reqwest::Url) -> bool {
+    network_url_is_allowed(url) && url.username().is_empty() && url.password().is_none()
+}
+
+async fn wait_for_cancel(cancel_rx: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *cancel_rx.borrow() {
+            return;
+        }
+        if cancel_rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Accepts both `sha256: <hex>` / `sha256:<hex>` lines and bare hashes.
@@ -442,7 +515,7 @@ fn show_window(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_github_source;
+    use super::{normalized_digest, parse_github_source, validate_network_url};
 
     #[test]
     fn parses_github_and_proxy_sources() {
@@ -464,5 +537,21 @@ mod tests {
                 "sub2api-account-usage".into()
             ))
         );
+    }
+
+    #[test]
+    fn accepts_only_complete_sha256_values() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(normalized_digest(&format!("sha256:{digest}")), Some(digest));
+        assert_eq!(normalized_digest("sha256:1234"), None);
+        assert_eq!(normalized_digest("not-a-checksum"), None);
+    }
+
+    #[test]
+    fn rejects_insecure_update_and_download_urls() {
+        assert!(validate_network_url("https://github.com/example/repo").is_ok());
+        assert!(validate_network_url("http://localhost:8080/latest.json").is_ok());
+        assert!(validate_network_url("http://updates.example.com/latest.json").is_err());
+        assert!(validate_network_url("https://user:pass@example.com/latest.json").is_err());
     }
 }

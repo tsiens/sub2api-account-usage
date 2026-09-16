@@ -38,8 +38,8 @@ struct RuntimeState {
     float_size: Mutex<(i32, i32)>,
     /// Last position we applied ourselves, so a drag does not have to ask Windows for it.
     float_current: Mutex<Option<FloatPosition>>,
-    pending_float_position: Mutex<Option<FloatPosition>>,
     float_theme: Mutex<String>,
+    tray_tooltip: Mutex<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -111,14 +111,21 @@ async fn save_config(
     runtime: State<'_, Arc<RuntimeState>>,
     values: Value,
 ) -> Result<crate::models::Config, String> {
-    let old_update_url = runtime.service.config().update_url;
+    let previous = runtime.service.config();
     let config = runtime
         .service
         .set_config(values)
         .map_err(|error| error.to_string())?;
+    if config.base_url != previous.base_url {
+        let mut state = PublicState::initial(config.clone());
+        state.status = "needs-auth".into();
+        state.message = "服务器地址已更改，请重新配置管理员鉴权。".into();
+        *runtime.state.lock().expect("public state poisoned") = state;
+        runtime.rotation_index.store(0, Ordering::SeqCst);
+    }
     sync_floating_bar(&app, &runtime, false);
     runtime.broadcast(&app);
-    if config.update_url != old_update_url {
+    if config.update_url != previous.update_url {
         runtime
             .updates
             .start(app.clone(), config.update_url.clone(), false);
@@ -269,11 +276,7 @@ async fn end_float_drag(
         .float_current
         .lock()
         .expect("float current poisoned") = Some(position);
-    let _ = runtime.store.set_float_position(position);
-    *runtime
-        .pending_float_position
-        .lock()
-        .expect("pending float poisoned") = Some(position);
+    runtime.store.set_float_position(position)?;
     sample_float_theme_async(&app, &runtime).await;
     Ok(())
 }
@@ -314,6 +317,15 @@ fn close_update(app: AppHandle) {
 #[tauri::command]
 fn get_data_directory() -> String {
     crate::store::data_directory().display().to_string()
+}
+
+#[tauri::command]
+fn get_float_theme(runtime: State<'_, Arc<RuntimeState>>) -> String {
+    runtime
+        .float_theme
+        .lock()
+        .expect("float theme poisoned")
+        .clone()
 }
 
 #[tauri::command]
@@ -361,6 +373,7 @@ pub fn run() {
             begin_float_drag,
             end_float_drag,
             get_data_directory,
+            get_float_theme,
             open_log,
             open_panel,
             close_panel,
@@ -384,8 +397,8 @@ pub fn run() {
                 float_monitors: Mutex::new(Vec::new()),
                 float_size: Mutex::new((FLOAT_WIDTH as i32, FLOAT_HEIGHT as i32)),
                 float_current: Mutex::new(None),
-                pending_float_position: Mutex::new(None),
                 float_theme: Mutex::new("dark".into()),
+                tray_tooltip: Mutex::new(String::new()),
             });
             app.manage(runtime.clone());
             configure_windows(app.handle());
@@ -513,21 +526,35 @@ async fn refresh_usage(app: &AppHandle, runtime: Arc<RuntimeState>) {
         Err(error) => {
             let message = error.to_string();
             append_log(&format!("刷新账户用量失败：{message}"));
+            let authentication_failed = message.contains("过期") || message.contains("鉴权");
+            let previous = runtime.state.lock().expect("public state poisoned").clone();
             *runtime.state.lock().expect("public state poisoned") = PublicState {
-                status: if message.contains("过期") || message.contains("鉴权") {
+                status: if authentication_failed {
                     "needs-auth"
                 } else {
                     "error"
                 }
                 .into(),
-                accounts: Vec::new(),
+                accounts: if authentication_failed {
+                    Vec::new()
+                } else {
+                    previous.accounts
+                },
                 failed: Vec::new(),
                 message,
-                refreshed_at: None,
+                refreshed_at: if authentication_failed {
+                    None
+                } else {
+                    previous.refreshed_at
+                },
                 is_refreshing: false,
                 auth_mode: runtime.service.auth_mode(),
                 current_index: 0,
-                total_accounts: 0,
+                total_accounts: if authentication_failed {
+                    0
+                } else {
+                    previous.total_accounts
+                },
                 config: runtime.service.config(),
             };
         }
@@ -575,6 +602,15 @@ fn start_timers(app: AppHandle, runtime: Arc<RuntimeState>) {
         }
     });
 
+    let tooltip_app = app.clone();
+    let tooltip_runtime = runtime.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            update_tray_tooltip(&tooltip_app, &tooltip_runtime);
+        }
+    });
+
     let window_app = app.clone();
     let window_runtime = runtime.clone();
     tauri::async_runtime::spawn(async move {
@@ -599,26 +635,6 @@ fn start_timers(app: AppHandle, runtime: Arc<RuntimeState>) {
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        }
-    });
-
-    // Single background saver for the floating bar position, so dragging never has to
-    // write the settings file on the pointer-move path.
-    let save_runtime = runtime.clone();
-    tauri::async_runtime::spawn(async move {
-        let mut last_saved: Option<FloatPosition> = None;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let pending = *save_runtime
-                .pending_float_position
-                .lock()
-                .expect("pending float poisoned");
-            if pending != last_saved {
-                if let Some(position) = pending {
-                    let _ = save_runtime.store.set_float_position(position);
-                }
-                last_saved = pending;
-            }
         }
     });
 
@@ -761,10 +777,6 @@ fn move_floating_bar(
         .float_current
         .lock()
         .expect("float current poisoned") = Some(position);
-    *runtime
-        .pending_float_position
-        .lock()
-        .expect("pending float poisoned") = Some(position);
     Ok(())
 }
 
@@ -917,8 +929,8 @@ async fn sample_float_theme_async(app: &AppHandle, runtime: &RuntimeState) {
     let mut current = runtime.float_theme.lock().expect("float theme poisoned");
     if current.as_str() != theme {
         *current = theme.into();
-        let _ = app.emit("float-color", theme);
     }
+    let _ = app.emit("float-color", theme);
 }
 
 fn spawn_float_theme_sample(app: &AppHandle, runtime: &Arc<RuntimeState>) {
@@ -963,7 +975,11 @@ fn update_tray_tooltip(app: &AppHandle, runtime: &RuntimeState) {
         };
         format!("{}  {suffix}", account_display_name(&item.account))
     };
-    let _ = tray.set_tooltip(Some(tooltip));
+    let mut previous = runtime.tray_tooltip.lock().expect("tray tooltip poisoned");
+    if *previous != tooltip {
+        let _ = tray.set_tooltip(Some(&tooltip));
+        *previous = tooltip;
+    }
 }
 
 fn format_countdown(value: Option<&Value>) -> String {

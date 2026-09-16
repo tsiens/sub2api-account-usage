@@ -58,6 +58,7 @@ impl UsageService {
     }
 
     pub fn set_config(&self, values: Value) -> ServiceResult<Config> {
+        let previous = self.config();
         let mut merged = serde_json::to_value(self.config())
             .map_err(|error| ServiceError::Message(error.to_string()))?;
         if let (Some(target), Some(source)) = (merged.as_object_mut(), values.as_object()) {
@@ -68,8 +69,9 @@ impl UsageService {
         let mut config: Config = serde_json::from_value(merged)
             .map_err(|error| ServiceError::Message(format!("设置格式无效：{error}")))?;
         config = validate_config(config)?;
+        let server_changed = server_origin(&previous.base_url) != server_origin(&config.base_url);
         self.store
-            .set_config(config.clone())
+            .set_config(config.clone(), server_changed)
             .map_err(ServiceError::Message)?;
         Ok(config)
     }
@@ -115,7 +117,7 @@ impl UsageService {
                 email: Some(email.trim().into()),
             });
         }
-        self.save_jwt_auth(&auth, email.trim())?;
+        self.save_jwt_auth(&auth, email.trim(), false)?;
         Ok(LoginResult {
             requires_2fa: false,
             temp_token: None,
@@ -141,7 +143,7 @@ impl UsageService {
                 false,
             )
             .await?;
-        self.save_jwt_auth(&auth, email.trim())?;
+        self.save_jwt_auth(&auth, email.trim(), false)?;
         Ok(LoginResult {
             requires_2fa: false,
             temp_token: None,
@@ -154,19 +156,10 @@ impl UsageService {
         if value.len() < 8 {
             return Err(ServiceError::Message("API Key 看起来过短。".into()));
         }
+        self.list_accounts_using(Some(value)).await?;
         self.store
-            .set_secret("adminApiKey", value)
-            .map_err(ServiceError::Message)?;
-        for key in ["accessToken", "refreshToken", "email"] {
-            self.store
-                .delete_secret(key)
-                .map_err(ServiceError::Message)?;
-        }
-        if let Err(error) = self.list_accounts().await {
-            let _ = self.store.delete_secret("adminApiKey");
-            return Err(error);
-        }
-        Ok(())
+            .replace_with_api_key(value)
+            .map_err(ServiceError::Message)
     }
 
     pub async fn logout(&self) -> ServiceResult<()> {
@@ -316,6 +309,10 @@ impl UsageService {
     }
 
     async fn list_accounts(&self) -> ServiceResult<Vec<Value>> {
+        self.list_accounts_using(None).await
+    }
+
+    async fn list_accounts_using(&self, api_key: Option<&str>) -> ServiceResult<Vec<Value>> {
         let mut accounts = Vec::new();
         let mut page = 1usize;
         let mut pages = 1usize;
@@ -323,9 +320,13 @@ impl UsageService {
             let path = format!(
                 "/api/v1/admin/accounts?page={page}&page_size={ACCOUNT_PAGE_SIZE}&include_scheduler_score=0&sort_by=name&sort_order=asc&timezone=Asia%2FShanghai"
             );
-            let data = self
-                .api_request_with_retry(Method::GET, &path, None)
-                .await?;
+            let data = if let Some(api_key) = api_key {
+                self.api_request_inner(Method::GET, &path, None, true, Some(api_key))
+                    .await?
+            } else {
+                self.api_request_with_retry(Method::GET, &path, None)
+                    .await?
+            };
             let items = data
                 .get("items")
                 .and_then(Value::as_array)
@@ -354,13 +355,14 @@ impl UsageService {
         path: &str,
         body: Option<Value>,
     ) -> ServiceResult<Value> {
+        let failed_access_token = self.store.secret("accessToken");
         match self
             .api_request(method.clone(), path, body.clone(), true)
             .await
         {
             Ok(value) => Ok(value),
             Err(error) if error.unauthorized() && self.auth_mode() == "bearer" => {
-                if !self.refresh_access_token().await {
+                if !self.refresh_access_token(&failed_access_token).await {
                     return Err(ServiceError::Api {
                         message: "管理员登录已过期，请重新登录。".into(),
                         status: Some(401),
@@ -373,8 +375,12 @@ impl UsageService {
         }
     }
 
-    async fn refresh_access_token(&self) -> bool {
+    async fn refresh_access_token(&self, failed_access_token: &str) -> bool {
         let _guard = self.refresh_token_lock.lock().await;
+        let current_access_token = self.store.secret("accessToken");
+        if !failed_access_token.is_empty() && current_access_token != failed_access_token {
+            return !current_access_token.is_empty();
+        }
         let refresh_token = self.store.secret("refreshToken");
         if refresh_token.is_empty() {
             return false;
@@ -389,38 +395,39 @@ impl UsageService {
             .await
         {
             Ok(auth) => self
-                .save_jwt_auth(&auth, &self.store.secret("email"))
+                .save_jwt_auth(&auth, &self.store.secret("email"), true)
                 .is_ok(),
             Err(error) => {
                 append_log(&format!("刷新登录令牌失败：{error}"));
-                let _ = self.store.delete_secret("accessToken");
-                let _ = self.store.delete_secret("refreshToken");
+                let _ = self.store.delete_secrets(&["accessToken", "refreshToken"]);
                 false
             }
         }
     }
 
-    fn save_jwt_auth(&self, auth: &Value, email: &str) -> ServiceResult<()> {
+    fn save_jwt_auth(
+        &self,
+        auth: &Value,
+        email: &str,
+        preserve_refresh_token: bool,
+    ) -> ServiceResult<()> {
         let access_token = auth
             .get("access_token")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ServiceError::Message("登录响应中缺少 access_token。".into()))?;
+        let existing_refresh_token =
+            preserve_refresh_token.then(|| self.store.secret("refreshToken"));
+        let refresh_token = auth
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                existing_refresh_token
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+            });
         self.store
-            .set_secret("accessToken", access_token)
-            .map_err(ServiceError::Message)?;
-        if let Some(refresh_token) = auth.get("refresh_token").and_then(Value::as_str) {
-            self.store
-                .set_secret("refreshToken", refresh_token)
-                .map_err(ServiceError::Message)?;
-        }
-        if !email.is_empty() {
-            self.store
-                .set_secret("email", email)
-                .map_err(ServiceError::Message)?;
-        }
-        self.store
-            .delete_secret("adminApiKey")
+            .replace_with_jwt(access_token, refresh_token, email)
             .map_err(ServiceError::Message)
     }
 
@@ -430,6 +437,17 @@ impl UsageService {
         path: &str,
         body: Option<Value>,
         auth: bool,
+    ) -> ServiceResult<Value> {
+        self.api_request_inner(method, path, body, auth, None).await
+    }
+
+    async fn api_request_inner(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        auth: bool,
+        override_api_key: Option<&str>,
     ) -> ServiceResult<Value> {
         let config = self.config();
         if config.base_url.is_empty() {
@@ -450,11 +468,16 @@ impl UsageService {
             .request(method.clone(), url.clone())
             .header(header::ACCEPT, "application/json")
             .header(header::ACCEPT_LANGUAGE, "zh-CN")
-            .header(header::USER_AGENT, "sub2api-account-usage-tauri/1.0.4");
+            .header(
+                header::USER_AGENT,
+                concat!("sub2api-account-usage-tauri/", env!("CARGO_PKG_VERSION")),
+            );
         if auth {
             let api_key = self.store.secret("adminApiKey");
             let access_token = self.store.secret("accessToken");
-            if !api_key.is_empty() {
+            if let Some(override_api_key) = override_api_key {
+                request = request.header("x-api-key", override_api_key);
+            } else if !api_key.is_empty() {
                 request = request.header("x-api-key", api_key);
             } else if !access_token.is_empty() {
                 request = request.bearer_auth(access_token);
@@ -526,6 +549,15 @@ fn validate_config(mut config: Config) -> ServiceResult<Config> {
                 "服务器地址只支持 http 或 https。".into(),
             ));
         }
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ServiceError::Message(
+                "服务器地址不能包含账号、密码、查询参数或片段。".into(),
+            ));
+        }
         if url.path() != "/" && !url.path().is_empty() {
             return Err(ServiceError::Message(
                 "服务器地址只能填写根地址，不要带 /api/v1 或其他路径。".into(),
@@ -540,6 +572,16 @@ fn validate_config(mut config: Config) -> ServiceResult<Config> {
             "更新地址只支持 http 或 https。".into(),
         ));
     }
+    if update.scheme() == "http"
+        && !matches!(
+            update.host_str().map(|host| host.to_ascii_lowercase()),
+            Some(host) if host == "localhost" || host == "127.0.0.1" || host == "::1"
+        )
+    {
+        return Err(ServiceError::Message(
+            "更新地址必须使用 HTTPS；仅本机地址允许 HTTP。".into(),
+        ));
+    }
     if !update.username().is_empty()
         || update.password().is_some()
         || update.query().is_some()
@@ -550,6 +592,15 @@ fn validate_config(mut config: Config) -> ServiceResult<Config> {
         ));
     }
     Ok(config)
+}
+
+fn server_origin(value: &str) -> Option<(String, String, Option<u16>)> {
+    let url = Url::parse(value).ok()?;
+    Some((
+        url.scheme().to_ascii_lowercase(),
+        url.host_str()?.to_ascii_lowercase(),
+        url.port_or_known_default(),
+    ))
 }
 
 fn empty_refresh(status: &str, message: &str) -> UsageRefresh {
@@ -711,7 +762,11 @@ fn number(value: Option<&Value>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_supports_batch_usage, normalize_account_stats, validate_usage};
+    use super::{
+        account_supports_batch_usage, normalize_account_stats, server_origin, validate_config,
+        validate_usage,
+    };
+    use crate::models::Config;
     use serde_json::json;
 
     #[test]
@@ -749,5 +804,32 @@ mod tests {
         assert_eq!(stats.total_requests, 2.0);
         assert_eq!(stats.total_tokens, 300.0);
         assert_eq!(stats.history[2].date, "2026-09-16");
+    }
+
+    #[test]
+    fn update_sources_require_https_except_for_loopback() {
+        let insecure = Config {
+            update_url: "http://updates.example.com/app".into(),
+            ..Default::default()
+        };
+        assert!(validate_config(insecure).is_err());
+
+        let local = Config {
+            update_url: "http://127.0.0.1:8080/latest.json".into(),
+            ..Default::default()
+        };
+        assert!(validate_config(local).is_ok());
+    }
+
+    #[test]
+    fn server_origin_ignores_trailing_slashes_but_not_ports() {
+        assert_eq!(
+            server_origin("https://example.com"),
+            server_origin("https://EXAMPLE.com/")
+        );
+        assert_ne!(
+            server_origin("https://example.com"),
+            server_origin("https://example.com:8443")
+        );
     }
 }

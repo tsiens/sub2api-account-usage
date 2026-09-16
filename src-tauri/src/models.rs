@@ -180,5 +180,5 @@ pub struct MoveDelta {
 pub struct AvailableUpdate {
     pub version: String,
     pub download_url: String,
-    pub sha256: Option<String>,
+    pub sha256: String,
 }

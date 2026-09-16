@@ -7,6 +7,8 @@ let suppressClick = false;
 let pendingDx = 0;
 let pendingDy = 0;
 let moveFrame = 0;
+let moveWorker;
+let dragReady = Promise.resolve();
 let rotationTimer;
 let rotationIndex = 0;
 const icons = {
@@ -85,7 +87,7 @@ shell.addEventListener('pointerdown', (event) => {
   };
   pendingDx = 0;
   pendingDy = 0;
-  window.sub2api.beginFloatDrag();
+  dragReady = window.sub2api.beginFloatDrag().catch(() => {});
   shell.classList.add('dragging');
   shell.setPointerCapture?.(event.pointerId);
 });
@@ -95,17 +97,29 @@ shell.addEventListener('pointerdown', (event) => {
 function flushMove() {
   moveFrame = 0;
   if (!pendingDx && !pendingDy) return;
-  const dx = pendingDx;
-  const dy = pendingDy;
-  pendingDx = 0;
-  pendingDy = 0;
-  void window.sub2api.moveFloat({ dx, dy }).catch(() => {});
+  if (moveWorker) return;
+  moveWorker = (async () => {
+    await dragReady;
+    while (pendingDx || pendingDy) {
+      const dx = pendingDx;
+      const dy = pendingDy;
+      pendingDx = 0;
+      pendingDy = 0;
+      await window.sub2api.moveFloat({ dx, dy });
+    }
+  })().catch(() => {}).finally(() => {
+    moveWorker = undefined;
+    if (pendingDx || pendingDy) {
+      moveFrame = window.requestAnimationFrame(flushMove);
+    }
+  });
 }
 
 shell.addEventListener('pointermove', (event) => {
   if (!dragState || event.pointerId !== dragState.pointerId || !event.buttons) return;
-  pendingDx += event.screenX - dragState.x;
-  pendingDy += event.screenY - dragState.y;
+  const scale = Number(window.devicePixelRatio) || 1;
+  pendingDx += (event.screenX - dragState.x) * scale;
+  pendingDy += (event.screenY - dragState.y) * scale;
   dragState.x = event.screenX;
   dragState.y = event.screenY;
   if (!dragState.moved && (Math.abs(event.screenX - dragState.startX) > 3 || Math.abs(event.screenY - dragState.startY) > 3)) {
@@ -119,10 +133,6 @@ function finishDrag(event) {
   if (!dragState || (event && event.pointerId !== dragState.pointerId)) return;
   if (moveFrame) window.cancelAnimationFrame(moveFrame);
   moveFrame = 0;
-  const dx = pendingDx;
-  const dy = pendingDy;
-  pendingDx = 0;
-  pendingDy = 0;
   const moved = dragState.moved;
   suppressClick = moved;
   shell.classList.remove('dragging');
@@ -133,7 +143,8 @@ function finishDrag(event) {
   // final position, so releasing the bar never jumps back by one frame.
   void (async () => {
     try {
-      if (dx || dy) await window.sub2api.moveFloat({ dx, dy });
+      flushMove();
+      while (moveWorker) await moveWorker;
       await window.sub2api.endFloatDrag();
     } catch { /* Dragging must never surface an error to the user. */ }
   })();
@@ -154,4 +165,8 @@ window.sub2api.onFloatColor((color) => {
   shell.classList.toggle('theme-light', color === 'light');
   shell.classList.toggle('theme-dark', color !== 'light');
 });
+window.sub2api.getFloatTheme().then((color) => {
+  shell.classList.toggle('theme-light', color === 'light');
+  shell.classList.toggle('theme-dark', color !== 'light');
+}).catch(() => {});
 window.sub2api.getState().then(render);

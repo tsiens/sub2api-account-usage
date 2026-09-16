@@ -34,6 +34,7 @@
     logout: () => invoke('logout'),
     getStats: (accountId) => invoke('get_stats', { accountId }),
     getDataDirectory: () => invoke('get_data_directory'),
+    getFloatTheme: () => invoke('get_float_theme'),
     openLog: () => invoke('open_log'),
     beginFloatDrag: () => invoke('begin_float_drag'),
     moveFloat: (delta) => invoke('move_float', { delta }),
