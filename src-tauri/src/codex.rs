@@ -58,14 +58,14 @@ fn models_path() -> PathBuf {
 fn models_dir_path() -> Result<PathBuf, String> {
     // 打包后，模型源文件位于 exe 同目录的 _up_/models 下（Tauri 资源目录）。
     // 用 current_exe 获取可执行文件真实路径，避免依赖 PathResolver 的路径解析差异。
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("获取可执行文件路径失败：{error}"))?;
+    let exe =
+        std::env::current_exe().map_err(|error| format!("获取可执行文件路径失败：{error}"))?;
     let dir = exe
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("_up_")
         .join("models");
-    let _ = append_log(&format!("models dir: {dir:?} exists={}", dir.exists()));
+    append_log(&format!("models dir: {dir:?} exists={}", dir.exists()));
     Ok(dir)
 }
 
@@ -127,7 +127,10 @@ fn read_json(path: &Path) -> Result<Value, String> {
 #[tauri::command]
 pub fn list_model_files() -> Result<Value, String> {
     let dir = models_dir_path()?;
-    let _ = append_log(&format!("list_model_files: {dir:?} exists={}", dir.exists()));
+    append_log(&format!(
+        "list_model_files: {dir:?} exists={}",
+        dir.exists()
+    ));
     if !dir.exists() {
         return Ok(json!([]));
     }
@@ -225,9 +228,7 @@ pub fn save_models(models: Value) -> Result<(), String> {
                     .or_else(|| item.get("id").and_then(|v| v.as_str()))
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| item.to_string());
-                if !by_slug.contains_key(&key) {
-                    by_slug.insert(key, item.clone());
-                }
+                by_slug.entry(key).or_insert_with(|| item.clone());
             }
         }
     }
@@ -268,7 +269,10 @@ pub fn list_backups(app: String) -> Result<Value, String> {
     // "models.*" 与 "config.*" 相互错位。
     items.sort_by(|a, b| {
         fn stamp(name: &str) -> u64 {
-            name.rsplit('.').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+            name.rsplit('.')
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
         }
         stamp(b["name"].as_str().unwrap_or_default())
             .cmp(&stamp(a["name"].as_str().unwrap_or_default()))
