@@ -385,6 +385,17 @@ pub fn run() {
             open_log,
             open_admin_page,
             show_float_menu,
+            crate::codex::get_codex_config,
+            crate::codex::open_codex_config,
+            crate::codex::save_codex_config,
+            crate::codex::prepare_models,
+            crate::codex::list_model_files,
+            crate::codex::read_models,
+            crate::codex::save_models,
+            crate::codex::list_backups,
+            crate::codex::preview_backup,
+            crate::codex::delete_backup,
+            crate::codex::restore_backup,
             open_panel,
             close_panel,
             cancel_update,
@@ -425,6 +436,7 @@ pub fn run() {
             });
             #[cfg(debug_assertions)]
             show_panel(app.handle(), "dashboard", "");
+            let _ = crate::codex::prepare_models();
             Ok(())
         })
         .run(tauri::generate_context!())

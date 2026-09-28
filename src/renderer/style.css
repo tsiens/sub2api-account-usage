@@ -110,4 +110,46 @@ label small { display: block; margin-top: 5px; color: #6f7b89; font-size: 11px; 
 .log-open-button span { flex: 0 0 auto; color: var(--accent); }
 code { color: var(--accent); }
 .toast { position: fixed; right: 14px; bottom: 14px; max-width: 360px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 5px; background: #263342; color: var(--text); box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+.preview-modal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 1000; }
+.preview-modal[hidden] { display: none; }
+.preview-modal-box { width: min(760px, 92vw); height: min(520px, 80vh); display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden; }
+.preview-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text); }
+.preview-modal-close { background: transparent; border: none; color: var(--muted); font-size: 15px; cursor: pointer; line-height: 1; }
+.preview-modal-close:hover { color: var(--text); }
+#previewModalContent { margin: 0; padding: 14px; overflow: auto; flex: 1; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--text); background: var(--panel-2); }
 @media (max-height: 700px) { .account-list { max-height: 380px; } }
+
+/* Codex */
+.tab.disabled { opacity: .4; cursor: not-allowed; }
+.codex-section { margin-bottom: 22px; }
+.codex-head { display: flex; align-items: center; gap: 10px; }
+.codex-head h2 { margin: 0; }
+.codex-head .icon-button { margin-left: auto; }
+.codex-note { color: var(--muted); font-size: 12px; margin: 8px 0 14px; }
+.codex-note code { color: var(--accent); }
+.codex-field { margin-bottom: 14px; }
+.codex-field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.codex-actions { display: flex; gap: 10px; align-items: center; }
+.codex-save { margin-top: 22px; }
+.codex-save .primary-button { width: 100%; }
+.model-tree { max-height: 380px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.model-file { margin-bottom: 6px; }
+.model-file summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; }
+.file-check, .model-row { display: flex; align-items: center; gap: 6px; }
+.model-row { margin: 4px 0 0 18px; font-size: 12px; }
+.model-row input, .file-check input { width: auto; margin: 0; accent-color: var(--accent); }
+.model-loading, .model-error, .model-empty { color: var(--muted); font-size: 12px; padding: 6px; }
+.model-error { color: var(--red); }
+.link-button { border: 0; padding: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
+.link-button code { color: inherit; }
+
+/* 备份管理 */
+.backups-list { list-style: none; margin: 0; padding: 0; }
+.backups-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+.backups-item { display: flex; align-items: center; gap: 12px; padding: 10px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.backups-item-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.backups-item-name strong { font-size: 13px; color: var(--text); }
+.backup-time { font-size: 11px; color: var(--muted); }
+.backups-item-size { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.backups-item-actions { flex: 0 0 auto; display: flex; gap: 6px; }
+.backups-item-actions .secondary-button, .backups-item-actions .danger-button { padding: 4px 8px; font-size: 12px; width: auto; margin-top: 0; white-space: nowrap; }

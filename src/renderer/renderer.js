@@ -74,6 +74,7 @@ function render(state) {
   }
   $('authMode').textContent = state.role === 'admin' ? '管理员账户' : state.role === 'user' ? '普通用户' : (state.authMode === 'bearer' ? '已登录' : '未配置');
   $('authMode').classList.toggle('ready', state.authMode === 'bearer');
+  updateCodexEnabled(config.baseUrl);
 }
 
 function accountCard(result, role) {
@@ -177,7 +178,14 @@ async function logout() {
   } catch (error) { toast(error.message || '清除鉴权失败'); }
 }
 
-document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => {
+  if (button.dataset.view === 'codex' && !codexEnabled) {
+    toast('请先在设置中填写服务器地址');
+    return;
+  }
+  switchView(button.dataset.view);
+  if (button.dataset.view === 'codex') initCodex();
+}));
 $('refreshButton').addEventListener('click', async () => {
   try { await window.sub2api.refresh(); toast('刷新完成'); }
   catch (error) { toast(error.message || '刷新失败'); }
@@ -205,3 +213,211 @@ window.sub2api.onState(render);
 window.sub2api.onNavigate(({ view, focus }) => { switchView(view); if (focus === 'server') $('baseUrl').focus(); if (focus === 'auth') $('email').focus(); });
 window.setInterval(updateCountdowns, 1000);
 window.sub2api.getState().then(render).catch((error) => toast(error.message || '加载状态失败'));
+
+let codexEnabled = false;
+let codexModelTree = [];
+
+function updateCodexEnabled(baseUrl) {
+  codexEnabled = Boolean(baseUrl && baseUrl.trim());
+  document.querySelectorAll('.tab[data-view="codex"]').forEach((tab) => {
+    tab.disabled = !codexEnabled;
+    tab.classList.toggle('disabled', !codexEnabled);
+  });
+}
+
+async function initCodex() {
+  try {
+    const config = await window.sub2api.getCodexConfig();
+    $('codexBearerToken').value = extractBearerToken(config);
+  } catch (error) {
+    toast(error.message || '读取 Codex 配置失败');
+  }
+  await refreshModelTree(false);
+  renderBackups();
+}
+
+function extractBearerToken(toml) {
+  const match = toml.match(/experimental_bearer_token\s*=\s*"([^"]*)"/);
+  return match ? match[1] : '';
+}
+
+async function refreshModelTree(forcibly) {
+  const treeEl = $('modelTree');
+  treeEl.innerHTML = '<div class="model-loading">加载中...</div>';
+  try {
+    await window.sub2api.prepareModels();
+    const [files, own] = await Promise.all([
+      window.sub2api.listModelFiles(),
+      window.sub2api.readModels(),
+    ]);
+    await renderModelTree(files, own?.models || []);
+  } catch (error) {
+    treeEl.innerHTML = `<div class="model-error">${escapeHtml(error.message || '加载失败')}</div>`;
+  }
+}
+
+async function renderModelTree(files, ownModels) {
+  const treeEl = $('modelTree');
+  codexModelTree = [];
+  let html = '';
+  // 已保存模型（models.json）的标识集合，用于恢复勾选
+  const savedSet = new Set((ownModels || []).map((m) => String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim()).filter(Boolean));
+  for (const file of files || []) {
+    const data = file.content;
+    const models = Array.isArray(data) ? data : (data?.models || []);
+    const fileKey = file.name;
+    const ids = models.map((m) => String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim()).filter(Boolean);
+    codexModelTree.push({ file: fileKey, group: file.group, models: ids });
+    const rows = ids.map((id) => {
+      const checked = savedSet.has(id) ? ' checked' : '';
+      return `<label class="model-row"><input type="checkbox"${checked} data-file="${escapeHtml(fileKey)}" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}</span></label>`;
+    }).join('');
+    html += `<details class="model-file" open><summary><label class="file-check"><input type="checkbox" data-filecheck="${escapeHtml(fileKey)}"><span>${escapeHtml(fileKey)}</span></label></summary>${rows || '<div class="model-empty">无模型</div>'}</details>`;
+  }
+  // 无法溯源的旧模型
+  const known = new Set();
+  codexModelTree.forEach((f) => f.models.forEach((m) => known.add(m)));
+  const legacy = (ownModels || []).filter((m) => {
+    const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
+    return id && !known.has(id);
+  });
+  if (legacy.length) {
+    const rows = legacy.map((m) => {
+      const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
+      const checked = savedSet.has(id) ? ' checked' : '';
+      return `<label class="model-row"><input type="checkbox"${checked} data-file="旧文件" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}</span></label>`;
+    }).join('');
+    html += `<details class="model-file legacy"><summary><label class="file-check"><input type="checkbox" data-filecheck="旧文件"><span>无法溯源</span></label></summary>${rows}</details>`;
+  }
+  treeEl.innerHTML = html;
+  treeEl.querySelectorAll('input[data-filecheck]').forEach((box) => box.addEventListener('change', () => {
+    const file = box.dataset.filecheck;
+    treeEl.querySelectorAll(`input[data-file="${CSS.escape(file)}"]`).forEach((m) => { m.checked = box.checked; });
+  }));
+}
+
+async function saveCodexConfig() {
+  const config = (await window.sub2api.getState());
+  const baseUrl = config.config?.baseUrl || '';
+  const token = $('codexBearerToken').value.trim();
+  await window.sub2api.saveCodexConfig({ baseUrl, bearerToken: token });
+}
+
+async function saveModels() {
+  const slugs = [];
+  document.querySelectorAll('#modelTree input[data-model]:checked').forEach((box) => {
+    slugs.push(box.dataset.model);
+  });
+  await window.sub2api.saveModels(slugs);
+}
+
+async function saveCodex() {
+  try {
+    await saveCodexConfig();
+    await saveModels();
+    renderBackups();
+    toast('配置与模型已保存');
+  } catch (error) {
+    toast(error.message || '保存失败');
+  }
+}
+
+$('openCodexConfig').addEventListener('click', () => window.sub2api.openCodexConfig().catch((e) => toast(e.message || '打开失败')));
+$('saveCodex').addEventListener('click', saveCodex);
+
+function formatBackupTime(name) {
+  const match = name.match(/(\d+)\.bak$/);
+  if (!match) return '';
+  const date = new Date(Number(match[1]) * 1000);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(date).replace(/\//g, '-');
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function renderBackups() {
+  const listEl = $('backupsList');
+  const emptyEl = $('backupsEmpty');
+  listEl.innerHTML = '<div class="model-loading">加载中...</div>';
+  emptyEl.hidden = true;
+  try {
+    const app = 'codex';
+    const backups = await window.sub2api.listBackups(app);
+    if (!backups || !backups.length) {
+      listEl.innerHTML = '';
+      emptyEl.hidden = false;
+      return;
+    }
+    listEl.innerHTML = backups.map((b) => {
+      const name = escapeHtml(b.name);
+      const time = formatBackupTime(b.name);
+      const kind = b.name.startsWith('config.') ? '配置' : (b.name.startsWith('models.') ? '模型' : '备份');
+      return `<li class="backups-item">
+        <span class="backups-item-name" title="${name}"><strong>${escapeHtml(kind)}</strong><span class="backup-time">${escapeHtml(time || name)}</span></span>
+        <span class="backups-item-size">${formatBytes(b.size)}</span>
+        <span class="backups-item-actions">
+          <button class="secondary-button" data-action="preview" data-name="${name}">打开</button>
+          <button class="secondary-button" data-action="restore" data-name="${name}">还原</button>
+          <button class="danger-button" data-action="delete" data-name="${name}">删除</button>
+        </span>
+      </li>`;
+    }).join('');
+    listEl.querySelectorAll('button[data-action]').forEach((btn) => btn.addEventListener('click', () => {
+      const name = btn.dataset.name;
+      const action = btn.dataset.action;
+      if (action === 'preview') previewBackupFile(app, name);
+      else if (action === 'restore') restoreBackupFile(app, name);
+      else if (action === 'delete') deleteBackupFile(app, name);
+    }));
+  } catch (error) {
+    listEl.innerHTML = `<div class="model-error">${escapeHtml(error.message || '读取备份失败')}</div>`;
+  }
+}
+
+async function previewBackupFile(app, name) {
+  try {
+    const content = await window.sub2api.previewBackup(app, name);
+    $('previewModalTitle').textContent = name;
+    $('previewModalContent').textContent = content;
+    $('previewModal').hidden = false;
+  } catch (error) {
+    toast(error.message || '打开失败');
+  }
+}
+
+function closePreviewModal() {
+  $('previewModal').hidden = true;
+}
+
+$('previewModalClose').addEventListener('click', closePreviewModal);
+$('previewModal').addEventListener('click', (event) => {
+  if (event.target === $('previewModal')) closePreviewModal();
+});
+
+async function restoreBackupFile(app, name) {
+  try {
+    await window.sub2api.restoreBackup(app, name);
+    toast('已还原');
+    renderBackups();
+  } catch (error) {
+    toast(error.message || '还原失败');
+  }
+}
+
+async function deleteBackupFile(app, name) {
+  try {
+    await window.sub2api.deleteBackup(app, name);
+    toast('已删除');
+    renderBackups();
+  } catch (error) {
+    toast(error.message || '删除失败');
+  }
+}
+
+
+

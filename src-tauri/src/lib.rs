@@ -1,4 +1,5 @@
 mod app;
+mod codex;
 mod models;
 mod platform;
 mod service;

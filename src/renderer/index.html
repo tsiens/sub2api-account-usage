@@ -16,6 +16,7 @@
     <nav class="tabs" aria-label="页面导航">
       <button class="tab active" data-view="dashboard">用量</button>
       <button class="tab" data-view="settings">设置</button>
+      <button class="tab" data-view="codex">Codex</button>
     </nav>
 
     <main>
@@ -49,8 +50,39 @@
         <div class="settings-section logs-section"><div class="section-label"><span>本地日志</span></div><p>日志文件位于应用安装目录：</p><button type="button" class="log-open-button" id="openLogButton"><code id="logDirectory">app.log</code><span>点击打开</span></button></div>
       </section>
 
+      <section id="codexView" class="view">
+        <div class="codex-section">
+          <div class="codex-head"><h2>配置</h2></div>
+          <p class="codex-note">将 Codex 连接信息写入 <button type="button" class="link-button" id="openCodexConfig"><code>~/.codex/config.toml</code></button>，合并保留原有内容。</p>
+          <div class="codex-field">
+            <label>API Key</label>
+            <input id="codexBearerToken" type="password" placeholder="输入 API Key" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="codex-section">
+          <div class="codex-head"><h2>模型</h2></div>
+          <div id="modelTree" class="model-tree"></div>
+        </div>
+        <div class="codex-save"><button class="primary-button" id="saveCodex">保存</button></div>
+        <div class="codex-section">
+          <div class="codex-head"><h2>备份管理</h2></div>
+          <ul class="backups-list" id="backupsList"></ul>
+          <div class="empty-state" id="backupsEmpty" hidden><div class="empty-icon">○</div><strong>暂无备份</strong><p>保存 Codex 配置或模型时会自动生成备份。</p></div>
+        </div>
+      </section>
+
     </main>
     <div class="toast" id="toast" hidden></div>
+    <div class="preview-modal" id="previewModal" hidden>
+      <div class="preview-modal-box">
+        <div class="preview-modal-head">
+          <span id="previewModalTitle">备份预览</span>
+          <button type="button" class="preview-modal-close" id="previewModalClose">✕</button>
+        </div>
+        <pre id="previewModalContent"></pre>
+      </div>
+    </div>
   </div>
   <script src="./bridge.js"></script>
   <script src="./renderer.js"></script>
