@@ -537,10 +537,6 @@ impl UsageService {
 
 fn normalize_config(mut config: Config) -> Config {
     config.base_url = config.base_url.trim().trim_end_matches('/').to_string();
-    config.update_url = config.update_url.trim().trim_end_matches('/').to_string();
-    if config.update_url.is_empty() {
-        config.update_url = crate::models::DEFAULT_UPDATE_URL.into();
-    }
     config.update_interval = config.update_interval.max(30);
     config.rotation_interval = config.rotation_interval.max(1);
     config.request_timeout = config.request_timeout.max(1000);
@@ -572,32 +568,6 @@ fn validate_config(mut config: Config) -> ServiceResult<Config> {
             ));
         }
         config.base_url = url.as_str().trim_end_matches('/').to_string();
-    }
-    let update = Url::parse(&config.update_url)
-        .map_err(|_| ServiceError::Message("更新地址无效。".into()))?;
-    if !matches!(update.scheme(), "http" | "https") {
-        return Err(ServiceError::Message(
-            "更新地址只支持 http 或 https。".into(),
-        ));
-    }
-    if update.scheme() == "http"
-        && !matches!(
-            update.host_str().map(|host| host.to_ascii_lowercase()),
-            Some(host) if host == "localhost" || host == "127.0.0.1" || host == "::1"
-        )
-    {
-        return Err(ServiceError::Message(
-            "更新地址必须使用 HTTPS；仅本机地址允许 HTTP。".into(),
-        ));
-    }
-    if !update.username().is_empty()
-        || update.password().is_some()
-        || update.query().is_some()
-        || update.fragment().is_some()
-    {
-        return Err(ServiceError::Message(
-            "更新地址不能包含账号、密码、查询参数或片段。".into(),
-        ));
     }
     Ok(config)
 }
@@ -760,10 +730,8 @@ fn number(value: Option<&Value>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_supports_batch_usage, server_origin, subscription_breakdown, validate_config,
-        validate_usage,
+        account_supports_batch_usage, server_origin, subscription_breakdown, validate_usage,
     };
-    use crate::models::Config;
     use serde_json::json;
 
     #[test]
@@ -806,21 +774,6 @@ mod tests {
         assert!(account_supports_batch_usage(
             &json!({ "platform": "gemini", "type": "key" })
         ));
-    }
-
-    #[test]
-    fn update_sources_require_https_except_for_loopback() {
-        let insecure = Config {
-            update_url: "http://updates.example.com/app".into(),
-            ..Default::default()
-        };
-        assert!(validate_config(insecure).is_err());
-
-        let local = Config {
-            update_url: "http://127.0.0.1:8080/latest.json".into(),
-            ..Default::default()
-        };
-        assert!(validate_config(local).is_ok());
     }
 
     #[test]

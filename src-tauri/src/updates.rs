@@ -326,47 +326,21 @@ async fn resolve_update(source: &str) -> Result<AvailableUpdate, String> {
     };
     validate_network_url(source)?;
     if let Some((proxy, owner, repository)) = parse_github_source(source) {
-        // Version check and download both go through the address the user configured:
-        // a ghproxy prefix is applied to the API call as well, and a plain GitHub URL
-        // stays direct.
-        let api_url =
-            format!("{proxy}https://api.github.com/repos/{owner}/{repository}/releases/latest");
-        let response = update_client()?
-            .get(&api_url)
-            .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
-            .send()
-            .await
-            .map_err(|error| format!("检查 GitHub Release 失败：{error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "检查 GitHub Release 失败：HTTP {}",
-                response.status().as_u16()
-            ));
-        }
-        let release: GithubRelease = response
-            .json()
-            .await
-            .map_err(|error| format!("解析 GitHub Release 失败：{error}"))?;
-        let asset = release
-            .assets
-            .iter()
-            .filter(|asset| asset.name.to_lowercase().ends_with(".exe"))
-            .max_by_key(|asset| {
-                let name = asset.name.to_lowercase();
-                (name.contains("setup"), !name.contains("portable"))
-            })
-            .ok_or_else(|| "最新 Release 中没有 Windows 安装程序。".to_string())?;
-        let digest = fetch_digest(&release, asset, &proxy).await?;
-        let url = if proxy.is_empty() {
-            asset.browser_download_url.clone()
+        // When the user configured a bare GitHub URL (no prefix), prefer connecting
+        // directly first and fall back to the gh-proxy.org prefix if that fails.
+        let prefixes: Vec<String> = if proxy.is_empty() {
+            vec![String::new(), "https://gh-proxy.org/".into()]
         } else {
-            format!("{proxy}{}", asset.browser_download_url)
+            vec![proxy]
         };
-        return Ok(AvailableUpdate {
-            version: release.tag_name.trim_start_matches('v').into(),
-            download_url: url,
-            sha256: digest,
-        });
+        let mut last_error: Option<String> = None;
+        for prefix in prefixes {
+            match resolve_github_through(&prefix, &owner, &repository).await {
+                Ok(update) => return Ok(update),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        return Err(last_error.unwrap_or_else(|| "检查 GitHub Release 失败。".into()));
     }
     let metadata_url = if source.ends_with(".json") {
         source.to_string()
@@ -393,6 +367,51 @@ async fn resolve_update(source: &str) -> Result<AvailableUpdate, String> {
             .and_then(normalized_digest)
             .map(str::to_string)
             .ok_or_else(|| "更新元数据缺少有效的 SHA-256 摘要。".to_string())?,
+    })
+}
+
+async fn resolve_github_through(
+    proxy: &str,
+    owner: &str,
+    repository: &str,
+) -> Result<AvailableUpdate, String> {
+    let api_url =
+        format!("{proxy}https://api.github.com/repos/{owner}/{repository}/releases/latest");
+    let response = update_client()?
+        .get(&api_url)
+        .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
+        .send()
+        .await
+        .map_err(|error| format!("检查 GitHub Release 失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "检查 GitHub Release 失败：HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let release: GithubRelease = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 GitHub Release 失败：{error}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .filter(|asset| asset.name.to_lowercase().ends_with(".exe"))
+        .max_by_key(|asset| {
+            let name = asset.name.to_lowercase();
+            (name.contains("setup"), !name.contains("portable"))
+        })
+        .ok_or_else(|| "最新 Release 中没有 Windows 安装程序。".to_string())?;
+    let digest = fetch_digest(&release, asset, proxy).await?;
+    let url = if proxy.is_empty() {
+        asset.browser_download_url.clone()
+    } else {
+        format!("{proxy}{}", asset.browser_download_url)
+    };
+    Ok(AvailableUpdate {
+        version: release.tag_name.trim_start_matches('v').into(),
+        download_url: url,
+        sha256: digest,
     })
 }
 

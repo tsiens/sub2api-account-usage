@@ -85,6 +85,12 @@ input { width: 100%; margin-top: 6px; padding: 9px 10px; border: 1px solid rgba(
 input:focus { border-color: var(--accent); }
 label small { display: block; margin-top: 5px; color: #6f7b89; font-size: 11px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.form-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.server-row { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 8px 12px; }
+.server-label { color: var(--muted); font-size: 12px; }
+.server-row input, .server-row small { grid-column: 1 / -1; margin-top: 0; }
+.tls-check { display: flex; align-items: center; gap: 6px; justify-self: end; white-space: nowrap; }
+.tls-check input { width: auto; margin: 0; accent-color: var(--accent); }
 .checkbox-label { display: flex; align-items: center; gap: 7px; margin-top: 22px; }
 .checkbox-label input { width: auto; margin: 0; accent-color: var(--accent); }
 .settings-section { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }

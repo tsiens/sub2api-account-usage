@@ -8,7 +8,6 @@ pub const DEFAULT_UPDATE_URL: &str = "https://github.com/tsiens/sub2api-account-
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub base_url: String,
-    pub update_url: String,
     pub update_interval: u64,
     pub rotation_interval: u64,
     pub request_timeout: u64,
@@ -21,7 +20,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             base_url: String::new(),
-            update_url: DEFAULT_UPDATE_URL.to_string(),
             update_interval: 300,
             rotation_interval: 5,
             request_timeout: 15_000,

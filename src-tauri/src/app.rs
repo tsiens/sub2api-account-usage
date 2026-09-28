@@ -1,5 +1,8 @@
 use crate::{
-    models::{CompleteLoginInput, FloatPosition, LoginInput, LoginResult, MoveDelta, PublicState},
+    models::{
+        CompleteLoginInput, FloatPosition, LoginInput, LoginResult, MoveDelta, PublicState,
+        DEFAULT_UPDATE_URL,
+    },
     platform,
     service::{account_display_name, UsageService},
     store::{append_log, Store},
@@ -127,11 +130,6 @@ async fn save_config(
     }
     sync_floating_bar(&app, &runtime, false);
     runtime.broadcast(&app);
-    if config.update_url != previous.update_url {
-        runtime
-            .updates
-            .start(app.clone(), config.update_url.clone(), false);
-    }
     Ok(config)
 }
 
@@ -423,7 +421,7 @@ pub fn run() {
                 refresh_usage(&handle, runtime.clone()).await;
                 runtime
                     .updates
-                    .start(handle, runtime.service.config().update_url, false);
+                    .start(handle, DEFAULT_UPDATE_URL.into(), false);
             });
             #[cfg(debug_assertions)]
             show_panel(app.handle(), "dashboard", "");
@@ -473,6 +471,15 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+fn refresh_tray_menu(app: &AppHandle) {
+    let Ok(menu) = build_app_menu(app) else {
+        return;
+    };
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
 fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let refresh = MenuItem::with_id(app, "refresh", "刷新", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
@@ -489,17 +496,24 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         startup_checked,
         None::<&str>,
     )?;
+    let config = app.state::<Arc<RuntimeState>>().service.config();
+    let visible = CheckMenuItem::with_id(
+        app,
+        "float-visible",
+        "显示悬浮条",
+        true,
+        config.show_floating_bar,
+        None::<&str>,
+    )?;
     let always_on_top = CheckMenuItem::with_id(
         app,
         "float-always-on-top",
         "悬浮条置顶",
         true,
-        app.state::<Arc<RuntimeState>>()
-            .service
-            .config()
-            .float_always_on_top,
+        config.float_always_on_top,
         None::<&str>,
     )?;
+    always_on_top.set_enabled(config.show_floating_bar)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
     Menu::with_items(
@@ -509,6 +523,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &settings,
             &update,
             &startup,
+            &visible,
             &always_on_top,
             &separator,
             &exit,
@@ -530,13 +545,26 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             let runtime = app.state::<Arc<RuntimeState>>();
             runtime
                 .updates
-                .start(app.clone(), runtime.service.config().update_url, true);
+                .start(app.clone(), DEFAULT_UPDATE_URL.into(), true);
         }
         "startup" => {
             let enabled = platform::startup_enabled().unwrap_or(false);
             if let Err(error) = platform::set_startup_enabled(!enabled) {
                 append_log(&error);
             }
+        }
+        "float-visible" => {
+            let runtime = app.state::<Arc<RuntimeState>>();
+            let current = runtime.service.config().show_floating_bar;
+            if let Err(error) = runtime
+                .service
+                .set_config(json!({ "showFloatingBar": !current }))
+            {
+                append_log(&error.to_string());
+            }
+            sync_floating_bar(app, &runtime, false);
+            refresh_tray_menu(app);
+            runtime.broadcast(app);
         }
         "float-always-on-top" => {
             let runtime = app.state::<Arc<RuntimeState>>();
@@ -702,11 +730,9 @@ fn start_timers(app: AppHandle, runtime: Arc<RuntimeState>) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
-            update_runtime.updates.start(
-                update_app.clone(),
-                update_runtime.service.config().update_url,
-                false,
-            );
+            update_runtime
+                .updates
+                .start(update_app.clone(), DEFAULT_UPDATE_URL.into(), false);
         }
     });
 }

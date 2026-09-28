@@ -44,8 +44,8 @@ Windows 10/11 系统托盘中的 Sub2API 账户用量监控工具，同时面向
 
 ## 自动更新
 
-- 默认从 `https://github.com/tsiens/sub2api-account-usage` 检查新版本。
-- 可以在设置中替换为其他 GitHub 仓库地址、`ghproxy` 前缀地址（例如 `https://ghproxy.net/https://github.com/owner/repo`），或提供 `latest.json` 的自定义更新地址。
+- 自动从内置地址 `https://github.com/tsiens/sub2api-account-usage` 检查新版本，无需配置更新地址。
+- 检查版本或下载新包直连 GitHub 失败时，会自动改用 `https://gh-proxy.org/` 前缀代理重试。
 - 远程更新必须使用 HTTPS（本机测试地址除外），并提供与安装包同名的 `.sha256` 摘要文件；校验失败时不会运行安装程序。
 - 托盘图标右键菜单提供“检查更新”，可随时手动检查新版本。
 - 程序启动时和运行期间会自动检查更新。
