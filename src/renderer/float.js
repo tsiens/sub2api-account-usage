@@ -28,7 +28,8 @@ function used(value) {
 }
 
 function providerIcon(account) {
-  const key = String(account?.platform || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+  const platform = account?.platform || account?.group?.platform || '';
+  const key = String(platform).trim().toLowerCase().replace(/[\s_]+/g, '-');
   return icons[key] || 'openai';
 }
 
@@ -39,23 +40,24 @@ function renderProviderIcon(icon) {
 
 function render(state) {
   const accounts = state.accounts || [];
+  const role = state.role || '';
   const values = accounts.length
     ? accounts.map((item) => {
-      const five = used(item.usage?.five_hour?.utilization);
-      const seven = used(item.usage?.seven_day?.utilization);
+      const left = role === 'user' ? used(item.usage?.weekly?.utilization) : used(item.usage?.five_hour?.utilization);
+      const right = role === 'user' ? used(item.usage?.monthly?.utilization) : used(item.usage?.seven_day?.utilization);
       return {
-        icon: providerIcon(item.account),
-        five: `${five}%`,
-        seven: `${seven}%`
+        icon: providerIcon(item.account, role),
+        left: `${left}%`,
+        right: `${right}%`
       };
     })
-    : [{ icon: 'openai', five: '--%', seven: '--%' }];
+    : [{ icon: 'openai', left: '--%', right: '--%' }];
   clearInterval(rotationTimer);
   rotationIndex = 0;
   track.style.transition = 'none';
   track.style.transform = 'translateY(0)';
   const slides = values.length > 1 ? [...values, values[0]] : values;
-  track.innerHTML = slides.map((value, index) => `<span class="marquee-item"${index === values.length ? ' aria-hidden="true"' : ''}><strong class="usage-value usage-five">${escapeHtml(value.five)}</strong><i class="provider-icon">${renderProviderIcon(value.icon)}</i><strong class="usage-value usage-seven">${escapeHtml(value.seven)}</strong></span>`).join('');
+  track.innerHTML = slides.map((value, index) => `<span class="marquee-item"${index === values.length ? ' aria-hidden="true"' : ''}><strong class="usage-value usage-five">${escapeHtml(value.left)}</strong><i class="provider-icon">${renderProviderIcon(value.icon)}</i><strong class="usage-value usage-seven">${escapeHtml(value.right)}</strong></span>`).join('');
   if (values.length > 1) {
     const interval = Math.max(1000, Number(state.config?.rotationInterval) * 1000 || 5000);
     rotationTimer = setInterval(advanceAccount, interval);

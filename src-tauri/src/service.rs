@@ -74,12 +74,21 @@ impl UsageService {
     }
 
     pub fn auth_mode(&self) -> String {
-        if !self.store.secret("adminApiKey").is_empty() {
-            "api-key".into()
-        } else if !self.store.secret("accessToken").is_empty() {
-            "bearer".into()
-        } else {
+        if self.store.secret("accessToken").is_empty() {
             "none".into()
+        } else {
+            "bearer".into()
+        }
+    }
+
+    pub fn role(&self) -> String {
+        let role = self.store.secret("role");
+        if role.eq_ignore_ascii_case("admin") {
+            "admin".into()
+        } else if !role.is_empty() {
+            "user".into()
+        } else {
+            String::new()
         }
     }
 
@@ -148,20 +157,9 @@ impl UsageService {
         })
     }
 
-    pub async fn set_admin_api_key(&self, api_key: &str) -> ServiceResult<()> {
-        let value = api_key.trim();
-        if value.len() < 8 {
-            return Err(ServiceError::Message("API Key 看起来过短。".into()));
-        }
-        self.list_accounts_using(Some(value)).await?;
-        self.store
-            .replace_with_api_key(value)
-            .map_err(ServiceError::Message)
-    }
-
     pub async fn logout(&self) -> ServiceResult<()> {
         let refresh_token = self.store.secret("refreshToken");
-        if !refresh_token.is_empty() && self.store.secret("adminApiKey").is_empty() {
+        if !refresh_token.is_empty() {
             if let Err(error) = self
                 .api_request(
                     Method::POST,
@@ -188,12 +186,12 @@ impl UsageService {
             ));
         }
         if self.auth_mode() == "none" {
-            return Ok(empty_refresh(
-                "needs-auth",
-                "请配置 Admin API Key 或管理员登录。",
-            ));
+            return Ok(empty_refresh("needs-auth", "请先登录你的账户。"));
         }
 
+        if self.role() == "user" {
+            return self.refresh_subscription_usage().await;
+        }
         let all_accounts = self.list_accounts().await?;
         let active: Vec<Value> = all_accounts
             .iter()
@@ -289,11 +287,45 @@ impl UsageService {
         })
     }
 
-    async fn list_accounts(&self) -> ServiceResult<Vec<Value>> {
-        self.list_accounts_using(None).await
+    async fn refresh_subscription_usage(&self) -> ServiceResult<UsageRefresh> {
+        let subscriptions = self
+            .api_request_with_retry(
+                Method::GET,
+                "/api/v1/subscriptions?timezone=Asia%2FShanghai",
+                None,
+            )
+            .await?;
+        let items = subscriptions.as_array().cloned().unwrap_or_default();
+        if items.is_empty() {
+            return Ok(empty_refresh("empty", "当前账号没有任何订阅。"));
+        }
+        let mut accounts = Vec::new();
+        for subscription in items {
+            if let Some(usage) = subscription_usage(&subscription) {
+                accounts.push(AccountUsage {
+                    account: subscription.clone(),
+                    usage,
+                });
+            }
+        }
+        if accounts.is_empty() {
+            return Ok(empty_refresh("empty", "当前账号的订阅没有可用的用量额度。"));
+        }
+        Ok(UsageRefresh {
+            status: "ready".into(),
+            message: String::new(),
+            total_accounts: accounts.len(),
+            accounts,
+            failed: Vec::new(),
+            refreshed_at: Some(Utc::now().to_rfc3339()),
+        })
     }
 
-    async fn list_accounts_using(&self, api_key: Option<&str>) -> ServiceResult<Vec<Value>> {
+    async fn list_accounts(&self) -> ServiceResult<Vec<Value>> {
+        self.list_accounts_using().await
+    }
+
+    async fn list_accounts_using(&self) -> ServiceResult<Vec<Value>> {
         let mut accounts = Vec::new();
         let mut page = 1usize;
         let mut pages = 1usize;
@@ -301,13 +333,9 @@ impl UsageService {
             let path = format!(
                 "/api/v1/admin/accounts?page={page}&page_size={ACCOUNT_PAGE_SIZE}&include_scheduler_score=0&sort_by=name&sort_order=asc&timezone=Asia%2FShanghai"
             );
-            let data = if let Some(api_key) = api_key {
-                self.api_request_inner(Method::GET, &path, None, true, Some(api_key))
-                    .await?
-            } else {
-                self.api_request_with_retry(Method::GET, &path, None)
-                    .await?
-            };
+            let data = self
+                .api_request_with_retry(Method::GET, &path, None)
+                .await?;
             let items = data
                 .get("items")
                 .and_then(Value::as_array)
@@ -345,7 +373,7 @@ impl UsageService {
             Err(error) if error.unauthorized() && self.auth_mode() == "bearer" => {
                 if !self.refresh_access_token(&failed_access_token).await {
                     return Err(ServiceError::Api {
-                        message: "管理员登录已过期，请重新登录。".into(),
+                        message: "登录已过期，请重新登录。".into(),
                         status: Some(401),
                         code: None,
                     });
@@ -407,8 +435,13 @@ impl UsageService {
                     .as_deref()
                     .filter(|value| !value.is_empty())
             });
+        let role = auth
+            .pointer("/user/role")
+            .and_then(Value::as_str)
+            .unwrap_or(self.store.secret("role").as_str())
+            .to_string();
         self.store
-            .replace_with_jwt(access_token, refresh_token, email)
+            .replace_with_jwt(access_token, refresh_token, email, &role)
             .map_err(ServiceError::Message)
     }
 
@@ -419,7 +452,7 @@ impl UsageService {
         body: Option<Value>,
         auth: bool,
     ) -> ServiceResult<Value> {
-        self.api_request_inner(method, path, body, auth, None).await
+        self.api_request_inner(method, path, body, auth).await
     }
 
     async fn api_request_inner(
@@ -428,7 +461,6 @@ impl UsageService {
         path: &str,
         body: Option<Value>,
         auth: bool,
-        override_api_key: Option<&str>,
     ) -> ServiceResult<Value> {
         let config = self.config();
         if config.base_url.is_empty() {
@@ -454,17 +486,12 @@ impl UsageService {
                 concat!("sub2api-account-usage-tauri/", env!("CARGO_PKG_VERSION")),
             );
         if auth {
-            let api_key = self.store.secret("adminApiKey");
             let access_token = self.store.secret("accessToken");
-            if let Some(override_api_key) = override_api_key {
-                request = request.header("x-api-key", override_api_key);
-            } else if !api_key.is_empty() {
-                request = request.header("x-api-key", api_key);
-            } else if !access_token.is_empty() {
+            if !access_token.is_empty() {
                 request = request.bearer_auth(access_token);
             } else {
                 return Err(ServiceError::Api {
-                    message: "尚未配置管理员鉴权".into(),
+                    message: "尚未登录。".into(),
                     status: Some(401),
                     code: None,
                 });
@@ -510,10 +537,6 @@ impl UsageService {
 
 fn normalize_config(mut config: Config) -> Config {
     config.base_url = config.base_url.trim().trim_end_matches('/').to_string();
-    config.admin_path = config.admin_path.trim().trim_matches('/').to_string();
-    if config.admin_path.is_empty() {
-        config.admin_path = "admin/dashboard".into();
-    }
     config.update_url = config.update_url.trim().trim_end_matches('/').to_string();
     if config.update_url.is_empty() {
         config.update_url = crate::models::DEFAULT_UPDATE_URL.into();
@@ -526,11 +549,6 @@ fn normalize_config(mut config: Config) -> Config {
 
 fn validate_config(mut config: Config) -> ServiceResult<Config> {
     config = normalize_config(config);
-    if config.admin_path.contains(['?', '#', '\\']) || config.admin_path.contains("://") {
-        return Err(ServiceError::Message(
-            "后台页面路径只能填写相对路径，例如 admin/dashboard。".into(),
-        ));
-    }
     if !config.base_url.is_empty() {
         let url = Url::parse(&config.base_url)
             .map_err(|_| ServiceError::Message("服务器地址无效。".into()))?;
@@ -670,12 +688,48 @@ fn validate_usage(usage: Value) -> Option<Value> {
     (five.is_finite() && seven.is_finite()).then_some(usage)
 }
 
+fn subscription_usage(subscription: &Value) -> Option<Value> {
+    let weekly = subscription_breakdown(subscription, "weekly");
+    let monthly = subscription_breakdown(subscription, "monthly");
+    (weekly.is_some() || monthly.is_some()).then(|| {
+        json!({
+            "weekly": weekly,
+            "monthly": monthly,
+        })
+    })
+}
+
+fn subscription_breakdown(subscription: &Value, window: &str) -> Option<Value> {
+    let used_key = format!("{window}_usage_usd");
+    let limit_key = format!("{window}_limit_usd");
+    let limit_path = format!("/group/{limit_key}");
+    let used = number(subscription.get(&used_key)).unwrap_or(0.0);
+    let limit = number(subscription.pointer(&limit_path)).unwrap_or(0.0);
+    let utilization = if limit > 0.0 {
+        used * 100.0 / limit
+    } else {
+        0.0
+    };
+    Some(json!({
+        "utilization": utilization,
+        "usageUsd": used,
+        "limitUsd": limit,
+    }))
+}
+
 pub fn account_display_name(account: &Value) -> String {
     account
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("未命名账户")
+        .or_else(|| {
+            account
+                .get("group")
+                .and_then(|group| group.get("name"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or("未命名")
         .to_string()
 }
 
@@ -705,7 +759,10 @@ fn number(value: Option<&Value>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_supports_batch_usage, server_origin, validate_config, validate_usage};
+    use super::{
+        account_supports_batch_usage, server_origin, subscription_breakdown, validate_config,
+        validate_usage,
+    };
     use crate::models::Config;
     use serde_json::json;
 
@@ -716,6 +773,26 @@ mod tests {
             "seven_day": { "utilization": 72 }
         });
         assert!(validate_usage(usage).is_some());
+    }
+
+    #[test]
+    fn subscription_breakdown_reads_limits_from_group() {
+        let subscription = json!({
+            "weekly_usage_usd": 30,
+            "monthly_usage_usd": 120,
+            "group": {
+                "weekly_limit_usd": 600,
+                "monthly_limit_usd": 2400
+            }
+        });
+        let weekly = subscription_breakdown(&subscription, "weekly").unwrap();
+        assert_eq!(weekly["usageUsd"], 30.0);
+        assert_eq!(weekly["limitUsd"], 600.0);
+        assert!((weekly["utilization"].as_f64().unwrap() - 5.0).abs() < 1e-9);
+        let monthly = subscription_breakdown(&subscription, "monthly").unwrap();
+        assert_eq!(monthly["usageUsd"], 120.0);
+        assert_eq!(monthly["limitUsd"], 2400.0);
+        assert!((monthly["utilization"].as_f64().unwrap() - 5.0).abs() < 1e-9);
     }
 
     #[test]
@@ -756,24 +833,5 @@ mod tests {
             server_origin("https://example.com"),
             server_origin("https://example.com:8443")
         );
-    }
-
-    #[test]
-    fn admin_path_must_be_relative() {
-        let valid = Config {
-            admin_path: "/admin/dashboard/".into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            validate_config(valid).unwrap().admin_path,
-            "admin/dashboard"
-        );
-        for invalid in ["https://example.com/admin", "admin/dashboard?token=secret"] {
-            let config = Config {
-                admin_path: invalid.into(),
-                ..Default::default()
-            };
-            assert!(validate_config(config).is_err());
-        }
     }
 }

@@ -86,24 +86,20 @@ impl Store {
         self.update(|data| data.secrets = BTreeMap::new())
     }
 
-    pub fn replace_with_api_key(&self, api_key: &str) -> Result<(), String> {
-        let encoded = encode_secret(api_key)?;
-        self.update(|data| {
-            data.secrets.clear();
-            data.secrets.insert("adminApiKey".into(), encoded);
-        })
-    }
-
     pub fn replace_with_jwt(
         &self,
         access_token: &str,
         refresh_token: Option<&str>,
         email: &str,
+        role: &str,
     ) -> Result<(), String> {
         let access = encode_secret(access_token)?;
         let refresh = refresh_token.map(encode_secret).transpose()?;
         let email = (!email.is_empty())
             .then(|| encode_secret(email))
+            .transpose()?;
+        let role = (!role.is_empty())
+            .then(|| encode_secret(role))
             .transpose()?;
         self.update(|data| {
             data.secrets.clear();
@@ -113,6 +109,9 @@ impl Store {
             }
             if let Some(email) = email {
                 data.secrets.insert("email".into(), email);
+            }
+            if let Some(role) = role {
+                data.secrets.insert("role".into(), role);
             }
         })
     }

@@ -34,7 +34,8 @@ function countdown(value) {
   return minutes ? `${minutes}分${seconds % 60}秒` : `${seconds % 60}秒`;
 }
 function provider(account) {
-  const key = String(account?.platform || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+  const platform = account?.platform || account?.group?.platform || '';
+  const key = String(platform).trim().toLowerCase().replace(/[\s_]+/g, '-');
   return icons[key] || '•';
 }
 function level(value) { return Number(value) >= 95 ? 'error' : Number(value) >= 80 ? 'warn' : ''; }
@@ -48,21 +49,22 @@ function render(state) {
   const empty = $('emptyState');
   const refreshed = state.refreshedAt ? new Date(state.refreshedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
   $('lastUpdated').textContent = refreshed ? `上次更新 ${refreshed}` : (state.isRefreshing ? '正在刷新…' : '尚未刷新');
-  statusTitle.textContent = state.isRefreshing ? '正在刷新…' : accounts.length ? `${accounts.length} 个账户` : state.status === 'error' ? '连接失败' : '需要配置';
+  const countLabel = state.role === 'user' ? '个订阅' : '个账户';
+  statusTitle.textContent = state.isRefreshing ? '正在刷新…' : accounts.length ? `${accounts.length} ${countLabel}` : state.status === 'error' ? '连接失败' : '需要配置';
   statusTitle.disabled = !accounts.length || state.isRefreshing;
   dot.className = `status-dot ${state.status === 'error' ? 'error' : state.status === 'ready' && accounts.some((item) => Math.max(Number(item.usage?.five_hour?.utilization) || 0, Number(item.usage?.seven_day?.utilization) || 0) >= 95) ? 'warn' : ''}`;
   notice.hidden = !(state.message && (state.status !== 'ready' || state.failed?.length));
   notice.textContent = state.failed?.length ? `${state.message || ''} ${state.failed.map((item) => `${item.accountName}: ${item.error}`).join('；')}` : (state.message || '');
   const accountsKey = JSON.stringify(accounts);
   if (accountsKey !== lastAccountsKey) {
-    list.innerHTML = accounts.map((result) => accountCard(result)).join('');
+    list.innerHTML = accounts.map((result) => accountCard(result, state.role)).join('');
     lastAccountsKey = accountsKey;
   }
   updateCountdowns();
   empty.hidden = accounts.length > 0;
   if (!accounts.length) {
     $('emptyTitle').textContent = state.status === 'needs-server' ? '还没有连接服务器' : state.status === 'needs-auth' ? '还没有配置鉴权' : '暂无账户用量';
-    $('emptyMessage').textContent = state.message || '请在设置中配置服务器和管理员鉴权。';
+    $('emptyMessage').textContent = state.message || '请在设置中登录你的账户。';
   }
   const config = state.config || {};
   const configKey = JSON.stringify(config);
@@ -70,17 +72,26 @@ function render(state) {
     fillConfig(config);
     lastConfigKey = configKey;
   }
-  $('authMode').textContent = state.authMode === 'api-key' ? 'Admin API Key' : state.authMode === 'bearer' ? '管理员登录' : '未配置';
-  $('authMode').classList.toggle('ready', ['api-key', 'bearer'].includes(state.authMode));
+  $('authMode').textContent = state.role === 'admin' ? '管理员账户' : state.role === 'user' ? '普通用户' : (state.authMode === 'bearer' ? '已登录' : '未配置');
+  $('authMode').classList.toggle('ready', state.authMode === 'bearer');
 }
 
-function accountCard(result) {
+function accountCard(result, role) {
   const account = result.account || {};
   const usage = result.usage || {};
-  const name = escapeHtml(account.name || '未命名账户');
+  const name = role === 'user'
+    ? escapeHtml(account.group?.name || '未命名订阅')
+    : escapeHtml(account.name || '未命名账户');
   const providerKey = provider(account);
   const providerLabel = escapeHtml(icons[providerKey] || providerKey);
-  return `<article class="account-card"><div class="account-head"><div class="account-name"><i class="provider-dot"></i><span>${providerLabel} ${name}</span></div><span class="updated">更新于 ${escapeHtml(formatTime(usage.updated_at))}</span></div>${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}</article>`;
+  const blocks = role === 'user'
+    ? `${quota('本周', usage.weekly)}${quota('本月', usage.monthly)}`
+    : `${quota('5 小时', usage.five_hour)}${quota('7 天', usage.seven_day)}`;
+  const headNote = role === 'user'
+    ? ''
+    : `更新于 ${escapeHtml(formatTime(usage.updated_at))}`;
+  const updatedSpan = headNote ? `<span class="updated">${headNote}</span>` : '';
+  return `<article class="account-card"><div class="account-head"><div class="account-name"><i class="provider-dot"></i><span>${providerLabel} ${name}</span></div>${updatedSpan}</div>${blocks}</article>`;
 }
 
 function quota(label, item) {
@@ -88,7 +99,16 @@ function quota(label, item) {
   const reset = countdown(item?.resets_at);
   const windowStats = item?.window_stats || {};
   const status = level(value);
-  return `<div class="quota"><div class="quota-row"><span>${label} <small class="quota-countdown" data-reset-at="${escapeHtml(item?.resets_at || '')}"${reset ? '' : ' hidden'}>${escapeHtml(reset)}</small></span><strong class="${value >= 100 ? 'full' : ''}">${pct(value)}</strong></div><div class="progress"><i class="${status}" style="width:${value}%"></i></div><div class="quota-meta"><span>${integer(windowStats.requests)} req · ${token(windowStats.tokens)} tok</span><span>重置 ${escapeHtml(formatTime(item?.resets_at))}</span></div></div>`;
+  const meta = (item?.usageUsd != null)
+    ? `$${formatUsd(item?.usageUsd)} / $${formatUsd(item?.limitUsd)}`
+    : `${integer(windowStats.requests)} req · ${token(windowStats.tokens)} tok`;
+  const timeMeta = item?.resets_at ? `重置 ${escapeHtml(formatTime(item?.resets_at))}` : '';
+  return `<div class="quota"><div class="quota-row"><span>${label} <small class="quota-countdown" data-reset-at="${escapeHtml(item?.resets_at || '')}"${reset ? '' : ' hidden'}>${escapeHtml(reset)}</small></span><strong class="${value >= 100 ? 'full' : ''}">${pct(value)}</strong></div><div class="progress"><i class="${status}" style="width:${value}%"></i></div><div class="quota-meta"><span>${meta}</span>${timeMeta ? `<span>${timeMeta}</span>` : ''}</div></div>`;
+}
+
+function formatUsd(value) {
+  const v = Number(value);
+  return Number.isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '0';
 }
 
 function updateCountdowns() {
@@ -106,7 +126,6 @@ function formatTime(value) {
 
 function fillConfig(config) {
   $('baseUrl').value = config.baseUrl || '';
-  $('adminPath').value = config.adminPath || 'admin/dashboard';
   $('updateUrl').value = config.updateUrl || '';
   $('updateInterval').value = config.updateInterval ?? 300;
   $('rotationInterval').value = config.rotationInterval ?? 5;
@@ -131,15 +150,9 @@ function toast(message) {
 async function saveConfig(event) {
   event.preventDefault();
   try {
-    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), adminPath: $('adminPath').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: Number($('updateInterval').value), rotationInterval: Number($('rotationInterval').value), requestTimeout: Number($('requestTimeout').value), allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
+    await window.sub2api.saveConfig({ baseUrl: $('baseUrl').value.trim(), updateUrl: $('updateUrl').value.trim(), updateInterval: Number($('updateInterval').value), rotationInterval: Number($('rotationInterval').value), requestTimeout: Number($('requestTimeout').value), allowInsecureTls: $('allowInsecureTls').checked, showFloatingBar: $('showFloatingBar').checked });
     toast('连接设置已保存');
   } catch (error) { toast(error.message || '保存失败'); }
-}
-
-async function saveApiKey(event) {
-  event.preventDefault();
-  try { await window.sub2api.setApiKey($('apiKey').value); $('apiKey').value = ''; toast('Admin API Key 已验证'); }
-  catch (error) { toast(error.message || 'API Key 验证失败'); }
 }
 
 async function login(event) {
@@ -180,7 +193,6 @@ $('closeButton').addEventListener('click', () => window.sub2api.close());
 $('settingsShortcut').addEventListener('click', () => switchView('settings'));
 $('emptySettingsButton').addEventListener('click', () => switchView('settings'));
 $('configForm').addEventListener('submit', saveConfig);
-$('apiKeyForm').addEventListener('submit', saveApiKey);
 $('loginForm').addEventListener('submit', login);
 $('totpButton').addEventListener('click', complete2fa);
 $('logoutButton').addEventListener('click', logout);
@@ -192,6 +204,6 @@ window.sub2api.getDataDirectory()
   .then((directory) => { $('logDirectory').textContent = `${directory}\\app.log`; })
   .catch(() => {});
 window.sub2api.onState(render);
-window.sub2api.onNavigate(({ view, focus }) => { switchView(view); if (focus === 'server') $('baseUrl').focus(); if (focus === 'auth') $('apiKey').focus(); });
+window.sub2api.onNavigate(({ view, focus }) => { switchView(view); if (focus === 'server') $('baseUrl').focus(); if (focus === 'auth') $('email').focus(); });
 window.setInterval(updateCountdowns, 1000);
 window.sub2api.getState().then(render).catch((error) => toast(error.message || '加载状态失败'));

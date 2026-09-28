@@ -78,6 +78,7 @@ impl RuntimeState {
         let mut state = self.state.lock().expect("public state poisoned").clone();
         state.config = self.service.config();
         state.auth_mode = self.service.auth_mode();
+        state.role = self.service.role();
         state.current_index = self.rotation_index.load(Ordering::SeqCst);
         state
     }
@@ -120,7 +121,7 @@ async fn save_config(
     if config.base_url != previous.base_url {
         let mut state = PublicState::initial(config.clone());
         state.status = "needs-auth".into();
-        state.message = "服务器地址已更改，请重新配置管理员鉴权。".into();
+        state.message = "服务器地址已更改，请重新登录。".into();
         *runtime.state.lock().expect("public state poisoned") = state;
         runtime.rotation_index.store(0, Ordering::SeqCst);
     }
@@ -169,21 +170,6 @@ async fn complete_login(
 }
 
 #[tauri::command]
-async fn set_api_key(
-    app: AppHandle,
-    runtime: State<'_, Arc<RuntimeState>>,
-    value: String,
-) -> Result<PublicState, String> {
-    runtime
-        .service
-        .set_admin_api_key(&value)
-        .await
-        .map_err(|error| error.to_string())?;
-    refresh_usage(&app, runtime.inner().clone()).await;
-    Ok(runtime.public_state())
-}
-
-#[tauri::command]
 async fn logout(
     app: AppHandle,
     runtime: State<'_, Arc<RuntimeState>>,
@@ -197,10 +183,11 @@ async fn logout(
         status: "needs-auth".into(),
         accounts: Vec::new(),
         failed: Vec::new(),
-        message: "请配置管理员鉴权。".into(),
+        message: "请登录。".into(),
         refreshed_at: None,
         is_refreshing: false,
         auth_mode: "none".into(),
+        role: String::new(),
         current_index: 0,
         total_accounts: 0,
         config: runtime.service.config(),
@@ -281,9 +268,14 @@ fn open_admin_page(runtime: State<'_, Arc<RuntimeState>>) -> Result<(), String> 
     if config.base_url.is_empty() {
         return Err("请先配置 Sub2API 服务器地址。".into());
     }
+    let path = if runtime.service.role() == "admin" {
+        "/admin/dashboard"
+    } else {
+        "/dashboard"
+    };
     let mut url =
         reqwest::Url::parse(&config.base_url).map_err(|_| "服务器地址无效。".to_string())?;
-    url.set_path(&format!("/{}", config.admin_path.trim_matches('/')));
+    url.set_path(path);
     open_external(url.as_str())
 }
 
@@ -386,7 +378,6 @@ pub fn run() {
             save_config,
             login,
             complete_login,
-            set_api_key,
             logout,
             move_float,
             begin_float_drag,
@@ -584,6 +575,7 @@ async fn refresh_usage(app: &AppHandle, runtime: Arc<RuntimeState>) {
                 refreshed_at: next.refreshed_at,
                 is_refreshing: false,
                 auth_mode: runtime.service.auth_mode(),
+                role: runtime.service.role(),
                 current_index: 0,
                 total_accounts: next.total_accounts,
                 config: runtime.service.config(),
@@ -615,6 +607,7 @@ async fn refresh_usage(app: &AppHandle, runtime: Arc<RuntimeState>) {
                 },
                 is_refreshing: false,
                 auth_mode: runtime.service.auth_mode(),
+                role: runtime.service.role(),
                 current_index: 0,
                 total_accounts: if authentication_failed {
                     0
@@ -977,29 +970,48 @@ fn update_tray_tooltip(app: &AppHandle, runtime: &RuntimeState) {
     } else {
         let index = runtime.rotation_index.load(Ordering::SeqCst) % state.accounts.len();
         let item = &state.accounts[index];
-        let five = item
-            .usage
-            .pointer("/five_hour/utilization")
-            .and_then(number)
-            .unwrap_or(0.0);
-        let seven = item
-            .usage
-            .pointer("/seven_day/utilization")
-            .and_then(number)
-            .unwrap_or(0.0);
-        let countdown = if five >= 100.0 {
-            format_countdown(item.usage.pointer("/five_hour/resets_at"))
-        } else if seven >= 100.0 {
-            format_countdown(item.usage.pointer("/seven_day/resets_at"))
+        if state.role == "user" {
+            let weekly = item
+                .usage
+                .pointer("/weekly/utilization")
+                .and_then(number)
+                .unwrap_or(0.0);
+            let monthly = item
+                .usage
+                .pointer("/monthly/utilization")
+                .and_then(number)
+                .unwrap_or(0.0);
+            format!(
+                "{}  {}% · {}%",
+                account_display_name(&item.account),
+                weekly.round(),
+                monthly.round()
+            )
         } else {
-            String::new()
-        };
-        let suffix = if countdown.is_empty() {
-            format!("{}% · {}%", five.round(), seven.round())
-        } else {
-            countdown
-        };
-        format!("{}  {suffix}", account_display_name(&item.account))
+            let five = item
+                .usage
+                .pointer("/five_hour/utilization")
+                .and_then(number)
+                .unwrap_or(0.0);
+            let seven = item
+                .usage
+                .pointer("/seven_day/utilization")
+                .and_then(number)
+                .unwrap_or(0.0);
+            let countdown = if five >= 100.0 {
+                format_countdown(item.usage.pointer("/five_hour/resets_at"))
+            } else if seven >= 100.0 {
+                format_countdown(item.usage.pointer("/seven_day/resets_at"))
+            } else {
+                String::new()
+            };
+            let suffix = if countdown.is_empty() {
+                format!("{}% · {}%", five.round(), seven.round())
+            } else {
+                countdown
+            };
+            format!("{}  {suffix}", account_display_name(&item.account))
+        }
     };
     let mut previous = runtime.tray_tooltip.lock().expect("tray tooltip poisoned");
     if *previous != tooltip {

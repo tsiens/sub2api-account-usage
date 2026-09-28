@@ -30,7 +30,6 @@
     saveConfig: (values) => invoke('save_config', { values }),
     login: (values) => invoke('login', { values }),
     completeLogin: (values) => invoke('complete_login', { values }),
-    setApiKey: (value) => invoke('set_api_key', { value }),
     logout: () => invoke('logout'),
     getDataDirectory: () => invoke('get_data_directory'),
     getFloatTheme: () => invoke('get_float_theme'),

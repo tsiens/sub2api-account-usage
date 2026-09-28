@@ -8,7 +8,6 @@ pub const DEFAULT_UPDATE_URL: &str = "https://github.com/tsiens/sub2api-account-
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub base_url: String,
-    pub admin_path: String,
     pub update_url: String,
     pub update_interval: u64,
     pub rotation_interval: u64,
@@ -22,7 +21,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             base_url: String::new(),
-            admin_path: "admin/dashboard".into(),
             update_url: DEFAULT_UPDATE_URL.to_string(),
             update_interval: 300,
             rotation_interval: 5,
@@ -72,6 +70,7 @@ pub struct PublicState {
     pub refreshed_at: Option<String>,
     pub is_refreshing: bool,
     pub auth_mode: String,
+    pub role: String,
     pub current_index: usize,
     pub total_accounts: usize,
     pub config: Config,
@@ -97,6 +96,7 @@ impl PublicState {
             refreshed_at: None,
             is_refreshing: false,
             auth_mode: "none".into(),
+            role: String::new(),
             current_index: 0,
             total_accounts: 0,
             config,
