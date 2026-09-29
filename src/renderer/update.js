@@ -2,6 +2,9 @@
 
 const $ = (id) => document.getElementById(id);
 
+// 屏蔽 WebView 默认右键菜单（打印、另存为等）。
+document.addEventListener('contextmenu', (event) => event.preventDefault());
+
 function formatBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;

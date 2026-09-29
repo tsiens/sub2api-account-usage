@@ -45,20 +45,15 @@ pub struct UpdateManager {
     downloaded: Mutex<Option<PathBuf>>,
     running: AtomicBool,
     cancel: AtomicBool,
-    cancel_tx: tokio::sync::watch::Sender<bool>,
-    finished: tokio::sync::Notify,
 }
 
 impl UpdateManager {
     pub fn new() -> Arc<Self> {
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         Arc::new(Self {
             state: Mutex::new(UpdateUiState::default()),
             downloaded: Mutex::new(None),
             running: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
-            cancel_tx,
-            finished: tokio::sync::Notify::new(),
         })
     }
 
@@ -67,15 +62,19 @@ impl UpdateManager {
     }
 
     pub fn start(self: &Arc<Self>, app: AppHandle, update_url: String, manual: bool) {
-        if self.running.swap(true, Ordering::SeqCst) {
-            if manual {
-                show_window(&app);
-                self.emit(&app);
-            }
+        // If an update is already in progress (checking, downloading, or still flushing
+        // its cache after a cancel), ignore further "检查更新" clicks entirely.
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            append_log("忽略检查更新：已有更新任务在进行中");
             return;
         }
+        append_log(&format!("开始检查更新（manual={manual}）"));
+        // Reset the cancel flag so a brand-new run never inherits a stale cancellation.
         self.cancel.store(false, Ordering::SeqCst);
-        let _ = self.cancel_tx.send(false);
         *self.downloaded.lock().expect("downloaded path poisoned") = None;
         if manual {
             show_window(&app);
@@ -89,67 +88,59 @@ impl UpdateManager {
             },
         );
         let manager = self.clone();
-        let mut cancel_rx = self.cancel_tx.subscribe();
         tauri::async_runtime::spawn(async move {
-            let work = manager.check_and_download(&app, &update_url);
-            tokio::pin!(work);
-            let result = tokio::select! {
-                biased;
-                _ = wait_for_cancel(&mut cancel_rx) => Err("cancelled".into()),
-                result = &mut work => result,
-            };
-            if let Err(error) = result {
-                if manager.cancel.load(Ordering::SeqCst) {
-                    manager.finish_cancel(&app).await;
-                } else {
-                    append_log(&format!("更新失败：{error}"));
-                    manager.set_state(
-                        &app,
-                        UpdateUiState {
-                            status: "error".into(),
-                            message: error,
-                            ..manager.state()
-                        },
-                    );
-                    if manual {
-                        show_window(&app);
-                    }
-                }
-            }
-            // Keep the manager busy until cancellation cleanup has completed. This
-            // prevents a new check from racing with the old task's final state update.
+            manager.run(&app, &update_url, manual).await;
             manager.running.store(false, Ordering::SeqCst);
-            manager.finished.notify_waiters();
         });
     }
 
-    pub async fn cancel(&self, app: &AppHandle) {
-        self.cancel.store(true, Ordering::SeqCst);
-        let _ = self.cancel_tx.send(true);
-        self.set_state(
-            app,
-            UpdateUiState {
-                status: "cancelling".into(),
-                message: "正在取消并清空更新缓存…".into(),
-                ..self.state()
-            },
-        );
-        if self.running.load(Ordering::SeqCst) {
-            // The caller must not be allowed to start another update until the
-            // cancelled task has released the file and removed its cache.
-            while self.running.load(Ordering::SeqCst) {
-                let finished = self.finished.notified();
-                tokio::select! {
-                    _ = finished => {}
-                    // Notify registration and the task's final store cannot be
-                    // made one atomic operation, so keep a bounded state check
-                    // as a fallback for that tiny race window.
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
-                }
-            }
-        } else {
+    async fn run(self: &Arc<Self>, app: &AppHandle, update_url: &str, manual: bool) {
+        // The cancellation check is cooperative: check_and_download polls it at each
+        // await point, so a background run responds promptly without ever requiring a
+        // global watch signal.
+        let result = self.check_and_download(app, update_url).await;
+        if self.cancel.load(Ordering::SeqCst) {
             self.finish_cancel(app).await;
+            return;
         }
+        if let Err(error) = result {
+            append_log(&format!("更新失败：{error}"));
+            self.set_state(
+                app,
+                UpdateUiState {
+                    status: "error".into(),
+                    message: error,
+                    ..self.state()
+                },
+            );
+            if manual {
+                show_window(app);
+            }
+        }
+    }
+
+    pub async fn cancel(&self, _app: &AppHandle) {
+        append_log(&format!(
+            "取消更新被调用（running={}）",
+            self.running.load(Ordering::SeqCst)
+        ));
+        self.cancel.store(true, Ordering::SeqCst);
+        // Wait for the running task to observe cancellation, clean up, and release the
+        // running flag before returning. This guarantees the cancel button only returns
+        // after everything is torn down, so the next "检查更新" starts fresh.
+        while self.running.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        append_log("取消更新完成，running 已释放");
+    }
+
+    async fn finish_cancel(&self, app: &AppHandle) {
+        append_log("执行取消清理：清空缓存并隐藏窗口");
+        if let Ok(cache) = updater_cache_directory() {
+            let _ = clear_directory(&cache).await;
+        }
+        *self.downloaded.lock().expect("downloaded path poisoned") = None;
+        hide_window(app);
     }
 
     pub fn install(&self, app: &AppHandle) -> Result<bool, String> {
@@ -175,11 +166,20 @@ impl UpdateManager {
         if cfg!(debug_assertions) {
             return Err("开发模式不检查更新。".into());
         }
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err("已取消".into());
+        }
         let available = resolve_update(source).await?;
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err("已取消".into());
+        }
         let current = Version::parse(&app.package_info().version.to_string())
             .map_err(|error| format!("当前版本号无效：{error}"))?;
         let latest = Version::parse(available.version.trim_start_matches('v'))
             .map_err(|error| format!("远程版本号无效：{error}"))?;
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err("已取消".into());
+        }
         if latest <= current {
             self.set_state(
                 app,
@@ -240,6 +240,10 @@ impl UpdateManager {
             },
         );
         while let Some(chunk) = stream.next().await {
+            if self.cancel.load(Ordering::SeqCst) {
+                let _ = tokio::fs::remove_file(&destination).await;
+                return Err("已取消".into());
+            }
             let chunk = chunk.map_err(|error| format!("下载更新失败：{error}"))?;
             if transferred.saturating_add(chunk.len() as u64) > MAX_UPDATE_BYTES {
                 return Err("更新文件超过 512 MB 安全限制。".into());
@@ -267,6 +271,10 @@ impl UpdateManager {
                 },
             );
         }
+        if self.cancel.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err("已取消".into());
+        }
         file.flush()
             .await
             .map_err(|error| format!("保存更新文件失败：{error}"))?;
@@ -290,21 +298,6 @@ impl UpdateManager {
         );
         show_window(app);
         Ok(())
-    }
-
-    async fn finish_cancel(&self, app: &AppHandle) {
-        if let Ok(cache) = updater_cache_directory() {
-            let _ = clear_directory(&cache).await;
-        }
-        *self.downloaded.lock().expect("downloaded path poisoned") = None;
-        self.set_state(
-            app,
-            UpdateUiState {
-                status: "cancelled".into(),
-                message: "已取消，更新缓存已清空。".into(),
-                ..Default::default()
-            },
-        );
     }
 
     fn set_state(&self, app: &AppHandle, state: UpdateUiState) {
@@ -503,17 +496,6 @@ fn network_url_is_safe(url: &reqwest::Url) -> bool {
     network_url_is_allowed(url) && url.username().is_empty() && url.password().is_none()
 }
 
-async fn wait_for_cancel(cancel_rx: &mut tokio::sync::watch::Receiver<bool>) {
-    loop {
-        if *cancel_rx.borrow() {
-            return;
-        }
-        if cancel_rx.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
 /// Accepts both `sha256: <hex>` / `sha256:<hex>` lines and bare hashes.
 fn normalized_digest(text: &str) -> Option<&str> {
     text.split_whitespace().find_map(|part| {
@@ -600,6 +582,12 @@ fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("update") {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn hide_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.hide();
     }
 }
 
