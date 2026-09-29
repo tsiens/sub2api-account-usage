@@ -171,7 +171,9 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
                 if old_token != new_token {
                     changed = true;
                 }
-                out.push_str(&format!("{indent}experimental_bearer_token = {new_token}\n"));
+                out.push_str(&format!(
+                    "{indent}experimental_bearer_token = {new_token}\n"
+                ));
                 continue;
             }
         }
