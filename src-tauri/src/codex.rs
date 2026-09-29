@@ -99,23 +99,137 @@ pub fn prepare_models() -> Result<(), String> {
 pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), String> {
     let config_path = codex_config_path()?;
     let catalog = "~/.codex/models.json".to_string();
-    let mut content = if config_path.exists() {
+    let original = if config_path.exists() {
         fs::read_to_string(&config_path)
             .map_err(|error| format!("读取 config.toml 失败：{error}"))?
     } else {
         String::new()
     };
 
-    content = set_toml_key(&content, "model_provider", "\"sub2api\"");
-    content = set_toml_key(&content, "preferred_auth_method", "\"apikey\"");
-    content = set_toml_key(&content, "forced_login_method", "\"api\"");
-    content = set_toml_key(&content, "model_catalog_json", &format!("\"{catalog}\""));
     let base = base_url.trim_end_matches('/');
-    let provider = format!(
-        "[model_providers.sub2api]\nname = \"AI\"\nbase_url = \"{base}/v1\"\nexperimental_bearer_token = \"{bearer_token}\"\nwire_api = \"responses\""
-    );
-    content = upsert_table(&content, "[model_providers.sub2api]", &provider);
-    write_if_changed(&config_path, &content, "codex", "config")
+    let catalog_val = format!("\"{catalog}\"");
+
+    let lines: Vec<&str> = original.lines().collect();
+    let first_table = lines
+        .iter()
+        .position(|line| line.trim().starts_with('['))
+        .unwrap_or(lines.len());
+
+    let mut out = String::new();
+    let mut seen_root = Vec::new();
+
+    // 更新 root 区键值（保持原缩进），其他行原样保留。
+    for line in lines.iter().take(first_table) {
+        let line = *line;
+        let trimmed = line.trim();
+        let indent = &line[..line.len() - trimmed.len()];
+        let updated = root_value(trimmed, &catalog_val);
+        if let Some((key, value)) = updated {
+            seen_root.push(key);
+            out.push_str(&format!("{indent}{key} = {value}\n"));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // 补齐缺失的 root 键。
+    for (key, value) in root_entries(&catalog_val) {
+        if !seen_root.contains(&key) {
+            out.push_str(&format!("{key} = {value}\n"));
+        }
+    }
+
+    // 处理从第一个表头开始的其余部分：定位并更新 provider 表的两行，其余原样。
+    let mut in_provider = false;
+    let mut seen_provider = false;
+    // 备份与否由 experimental_bearer_token 是否变化决定。
+    let mut changed = false;
+    let mut old_token = String::new();
+    for line in lines.iter().skip(first_table) {
+        let line = *line;
+        let trimmed = line.trim();
+        let indent = &line[..line.len() - trimmed.len()];
+        if trimmed == "[model_providers.sub2api]" {
+            in_provider = true;
+            seen_provider = true;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_provider {
+            if trimmed.starts_with('[') {
+                in_provider = false;
+            } else if trimmed.starts_with("base_url") {
+                out.push_str(&format!("{indent}base_url = \"{base}/v1\"\n"));
+                continue;
+            } else if trimmed.starts_with("experimental_bearer_token") {
+                // 提取旧 token 用于对比（含引号，若缺失则为空串）。
+                if let Some(eq) = trimmed.find('=') {
+                    old_token = trimmed[eq + 1..].trim().to_string();
+                }
+                let new_token = format!("\"{bearer_token}\"");
+                if old_token != new_token {
+                    changed = true;
+                }
+                out.push_str(&format!("{indent}experimental_bearer_token = {new_token}\n"));
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    // provider 表原本不存在时整体插入。
+    if !seen_provider {
+        changed = true;
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("[model_providers.sub2api]\n");
+        out.push_str("name = \"AI\"\n");
+        out.push_str(&format!("base_url = \"{base}/v1\"\n"));
+        out.push_str(&format!("experimental_bearer_token = \"{bearer_token}\"\n"));
+        out.push_str("wire_api = \"responses\"\n");
+    }
+
+    let candidate = if out.ends_with('\n') { out } else { out + "\n" };
+    if changed {
+        write_atomic(&config_path, &candidate)?;
+        back_up_content(&candidate, "codex", "config")
+    } else {
+        Ok(())
+    }
+}
+
+fn root_value<'a>(trimmed: &str, catalog_val: &'a str) -> Option<(&'static str, &'a str)> {
+    let key = if trimmed.starts_with("model_provider") {
+        "model_provider"
+    } else if trimmed.starts_with("preferred_auth_method") {
+        "preferred_auth_method"
+    } else if trimmed.starts_with("forced_login_method") {
+        "forced_login_method"
+    } else if trimmed.starts_with("model_catalog_json") {
+        "model_catalog_json"
+    } else {
+        return None;
+    };
+    let value = match key {
+        "model_provider" => "\"sub2api\"",
+        "preferred_auth_method" => "\"apikey\"",
+        "forced_login_method" => "\"api\"",
+        "model_catalog_json" => catalog_val,
+        _ => unreachable!(),
+    };
+    Some((key, value))
+}
+
+fn root_entries(_catalog_val: &str) -> Vec<(&'static str, &str)> {
+    vec![
+        ("model_provider", "\"sub2api\""),
+        ("preferred_auth_method", "\"apikey\""),
+        ("forced_login_method", "\"api\""),
+        ("model_catalog_json", _catalog_val),
+    ]
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -152,6 +266,15 @@ pub fn list_model_files() -> Result<Value, String> {
             .next()
             .map(str::to_string)
             .unwrap_or_else(|| name.clone());
+        // 为每个模型对象注入来源字段，用于在多源文件间唯一锁定同名模型。
+        let mut content = content;
+        if let Some(models) = content.get_mut("models").and_then(|v| v.as_array_mut()) {
+            for model in models {
+                if let Some(obj) = model.as_object_mut() {
+                    obj.insert("sub2api_source".into(), json!(name));
+                }
+            }
+        }
         files.push(json!({
             "name": name,
             "group": group,
@@ -176,20 +299,41 @@ pub fn read_models() -> Result<Value, String> {
 pub fn save_models(models: Value) -> Result<(), String> {
     let path = models_path();
 
-    // 从勾选的 slug 列表组装完整的模型对象。
-    let selected: Vec<String> = models
+    // 勾选条目：支持两种形式——
+    //   { sub2api_source, model } 复合键（新），或裸 slug 字符串（旧格式向后兼容）。
+    // 复合键用于在多源文件间唯一锁定同名模型。
+    let selected: Vec<(String, String)> = models
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
+                .filter_map(|v| {
+                    if let Some(slug) = v.as_str() {
+                        return Some((String::new(), slug.to_string()));
+                    }
+                    let source = v
+                        .get("sub2api_source")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let slug = v
+                        .get("model")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if slug.is_empty() {
+                        None
+                    } else {
+                        Some((source, slug))
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
 
-    // 读取所有源文件，建立 slug -> 完整模型对象 的映射。
+    // 读取所有源文件，建立 (source, slug) -> 完整模型对象 的映射。
     let dir = models_dir_path()?;
-    let mut by_slug: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut by_slug: std::collections::HashMap<(String, String), Value> =
+        std::collections::HashMap::new();
     if dir.exists() {
         for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
@@ -197,6 +341,7 @@ pub fn save_models(models: Value) -> Result<(), String> {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
+            let source = entry.file_name().to_string_lossy().to_string();
             let content = read_json(&path)?;
             let items = content
                 .get("models")
@@ -205,14 +350,14 @@ pub fn save_models(models: Value) -> Result<(), String> {
                 .unwrap_or_default();
             for item in items {
                 if let Some(slug) = item.get("slug").and_then(|v| v.as_str()) {
-                    by_slug.insert(slug.to_string(), item.clone());
+                    by_slug.insert((source.clone(), slug.to_string()), item.clone());
                 }
             }
         }
     }
 
-    // 从现有 models.json 补充无法溯源的模型（源文件中没有的旧模型），
-    // 保证勾选后它们的完整对象不会丢失。
+    // 从现有 models.json 补充旧模型：带 sub2api_source 的按 (source, slug) 收录，
+    // 否则按 slug 收录到空 source（无法溯源）。
     if path.exists() {
         if let Ok(prev) = read_json(&path) {
             let prev_items = prev
@@ -221,23 +366,44 @@ pub fn save_models(models: Value) -> Result<(), String> {
                 .cloned()
                 .unwrap_or_default();
             for item in prev_items {
-                let key = item
-                    .get("modelName")
+                let source = item
+                    .get("sub2api_source")
                     .and_then(|v| v.as_str())
-                    .or_else(|| item.get("slug").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let slug = item
+                    .get("slug")
+                    .and_then(|v| v.as_str())
                     .or_else(|| item.get("id").and_then(|v| v.as_str()))
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| item.to_string());
-                by_slug.entry(key).or_insert_with(|| item.clone());
+                    .unwrap_or_default();
+                if !slug.is_empty() {
+                    by_slug
+                        .entry((source, slug))
+                        .or_insert_with(|| item.clone());
+                }
             }
         }
     }
 
-    // 按勾选顺序提取模型（找不到则跳过）。
+    // 按勾选顺序提取模型（找不到则跳过），并为每个模型记录来源，保证可溯源。
     let mut out_models: Vec<Value> = Vec::new();
-    for slug in &selected {
-        if let Some(model) = by_slug.get(slug) {
-            out_models.push(model.clone());
+    for (source, slug) in &selected {
+        if let Some(model) = by_slug.get(&(source.clone(), slug.clone())) {
+            let mut model = model.clone();
+            if let Some(obj) = model.as_object_mut() {
+                obj.insert("sub2api_source".into(), json!(source));
+            }
+            out_models.push(model);
+        } else if source.is_empty() {
+            // 旧格式（空 source）也尝试用空 source 无法溯源兜底。
+            if let Some(model) = by_slug.get(&(String::new(), slug.clone())) {
+                let mut model = model.clone();
+                if let Some(obj) = model.as_object_mut() {
+                    obj.insert("sub2api_source".into(), json!(""));
+                }
+                out_models.push(model);
+            }
         }
     }
 
@@ -352,58 +518,4 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, content).map_err(|error| format!("写入失败：{error}"))?;
     fs::rename(&tmp, path).map_err(|error| format!("替换文件失败：{error}"))
-}
-
-fn set_toml_key(content: &str, key: &str, value: &str) -> String {
-    let mut out = String::new();
-    let mut replaced = false;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with(&format!("{key} =")) || trimmed == key {
-            out.push_str(&format!("{key} = {value}\n"));
-            replaced = true;
-        } else if !replaced && trimmed.starts_with('[') {
-            out.push_str(&format!("{key} = {value}\n"));
-            replaced = true;
-            out.push_str(line);
-            out.push('\n');
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !replaced {
-        // Keep trailing newline sane.
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&format!("{key} = {value}\n"));
-    }
-    out
-}
-
-fn upsert_table(content: &str, header: &str, body: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if let Some(start) = lines.iter().position(|line| line.trim_start() == header) {
-        let mut end = start + 1;
-        while end < lines.len() && !lines[end].starts_with('[') {
-            end += 1;
-        }
-        let mut out = lines[..start].join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(body);
-        out.push('\n');
-        out.push_str(&lines[end..].join("\n"));
-        out
-    } else {
-        let mut out = content.trim_end().to_string();
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(body);
-        out.push('\n');
-        out
-    }
 }

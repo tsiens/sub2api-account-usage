@@ -260,40 +260,82 @@ async function renderModelTree(files, ownModels) {
   const treeEl = $('modelTree');
   codexModelTree = [];
   let html = '';
-  // 已保存模型（models.json）的标识集合，用于恢复勾选
-  const savedSet = new Set((ownModels || []).map((m) => String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim()).filter(Boolean));
+  // 已保存模型的复合键（sub2api_source + 模型标识），用于恢复勾选，
+  // 使同名模型在不同来源文件中能各自独立勾选。
+  const savedSet = new Set((ownModels || []).map((m) => {
+    const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
+    return id ? `${m?.sub2api_source || ''}\u0000${id}` : '';
+  }).filter(Boolean));
   for (const file of files || []) {
     const data = file.content;
     const models = Array.isArray(data) ? data : (data?.models || []);
     const fileKey = file.name;
-    const ids = models.map((m) => String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim()).filter(Boolean);
+    const ids = models.map((m) => ({
+      id: String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim(),
+      source: String(m?.sub2api_source || ''),
+    })).filter((x) => x.id);
     codexModelTree.push({ file: fileKey, group: file.group, models: ids });
-    const rows = ids.map((id) => {
-      const checked = savedSet.has(id) ? ' checked' : '';
-      return `<label class="model-row"><input type="checkbox"${checked} data-file="${escapeHtml(fileKey)}" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}</span></label>`;
+    const rows = ids.map(({ id, source }) => {
+      const checked = savedSet.has(`${source}\u0000${id}`) ? ' checked' : '';
+      return `<label class="model-row"><input type="checkbox"${checked} data-file="${escapeHtml(fileKey)}" data-source="${escapeHtml(source)}" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}</span></label>`;
     }).join('');
     html += `<details class="model-file" open><summary><label class="file-check"><input type="checkbox" data-filecheck="${escapeHtml(fileKey)}"><span>${escapeHtml(fileKey)}</span></label></summary>${rows || '<div class="model-empty">无模型</div>'}</details>`;
   }
   // 无法溯源的旧模型
   const known = new Set();
-  codexModelTree.forEach((f) => f.models.forEach((m) => known.add(m)));
+  codexModelTree.forEach((f) => f.models.forEach((m) => known.add(m.id)));
   const legacy = (ownModels || []).filter((m) => {
     const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
+    // 无法溯源：当前任何来源文件里都没有该模型（无论是否带有 sub2api_source）。
     return id && !known.has(id);
   });
   if (legacy.length) {
     const rows = legacy.map((m) => {
       const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
-      const checked = savedSet.has(id) ? ' checked' : '';
-      return `<label class="model-row"><input type="checkbox"${checked} data-file="旧文件" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}</span></label>`;
+      const source = m?.sub2api_source || '';
+      const checked = savedSet.has(`${source}\u0000${id}`) ? ' checked' : '';
+      const sourceLabel = source ? ` <small class="legacy-source">(${escapeHtml(source)})</small>` : '';
+      return `<label class="model-row"><input type="checkbox"${checked} data-file="旧文件" data-source="${escapeHtml(source)}" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}${sourceLabel}</span></label>`;
     }).join('');
     html += `<details class="model-file legacy"><summary><label class="file-check"><input type="checkbox" data-filecheck="旧文件"><span>无法溯源</span></label></summary>${rows}</details>`;
   }
   treeEl.innerHTML = html;
-  treeEl.querySelectorAll('input[data-filecheck]').forEach((box) => box.addEventListener('change', () => {
-    const file = box.dataset.filecheck;
-    treeEl.querySelectorAll(`input[data-file="${CSS.escape(file)}"]`).forEach((m) => { m.checked = box.checked; });
-  }));
+
+  // 更新某个来源文件的文件级勾选框三态：全勾 / 全不勾 / 部分(busy)。
+  function updateFileCheck(file) {
+    const box = treeEl.querySelector(`input[data-filecheck="${CSS.escape(file)}"]`);
+    if (!box) return;
+    const models = [...treeEl.querySelectorAll(`input[data-file="${CSS.escape(file)}"]`)];
+    const checked = models.filter((m) => m.checked).length;
+    if (models.length === 0) {
+      box.checked = false;
+      box.indeterminate = false;
+      return;
+    }
+    box.checked = checked === models.length;
+    box.indeterminate = checked > 0 && checked < models.length;
+  }
+
+  // 初始化所有文件级勾选框三态
+  treeEl.querySelectorAll('input[data-filecheck]').forEach((box) => updateFileCheck(box.dataset.filecheck));
+
+  // 事件委托：子模型勾选变化时同步文件级三态；文件级勾选变化时联动所有子模型
+  treeEl.addEventListener('change', (event) => {
+    const target = event.target;
+    if (target.matches('input[data-filecheck]')) {
+      const file = target.dataset.filecheck;
+      const models = treeEl.querySelectorAll(`input[data-file="${CSS.escape(file)}"]`);
+      const total = models.length;
+      const checkedCount = [...models].filter((m) => m.checked).length;
+      // 已全选 -> 全不选；否则（含半选/全不选） -> 全选
+      const checkAll = checkedCount !== total;
+      models.forEach((m) => { m.checked = checkAll; });
+      updateFileCheck(file);
+    } else if (target.matches('input[data-model]')) {
+      const file = target.dataset.file;
+      updateFileCheck(file);
+    }
+  });
 }
 
 async function saveCodexConfig() {
@@ -304,11 +346,14 @@ async function saveCodexConfig() {
 }
 
 async function saveModels() {
-  const slugs = [];
+  const sel = [];
   document.querySelectorAll('#modelTree input[data-model]:checked').forEach((box) => {
-    slugs.push(box.dataset.model);
+    sel.push({
+      sub2api_source: box.dataset.source || '',
+      model: box.dataset.model,
+    });
   });
-  await window.sub2api.saveModels(slugs);
+  await window.sub2api.saveModels(sel);
 }
 
 async function saveCodex() {
