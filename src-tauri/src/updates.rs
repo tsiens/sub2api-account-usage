@@ -535,12 +535,65 @@ fn updater_cache_directory() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法确定更新缓存目录。".to_string())
 }
 
+/// 清空更新缓存目录。逐项删除比一次性 remove_dir_all 对 Windows 上的
+/// 瞬态错误（如 os error 4395 文件占用/重解析点）更稳健，删除会重试。
 async fn clear_directory(path: &Path) -> Result<(), String> {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("清空更新缓存失败：{error}")),
+    remove_path_recursive(path)
+        .await
+        .map_err(|error| format!("清空更新缓存失败：{error}"))
+}
+
+async fn remove_path_recursive(path: &Path) -> Result<(), String> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    // 目录（且非符号链接）先递归删除内容，再删除自身。
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = tokio::fs::read_dir(path)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut children = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            children.push(entry.path());
+        }
+        for child in children {
+            Box::pin(remove_path_recursive(&child)).await?;
+        }
+        remove_with_retry(path, true).await
+    } else {
+        remove_with_retry(path, false).await
     }
+}
+
+/// 对单个文件或目录做带重试的删除；目录用 remove_dir，文件用 remove_file。
+async fn remove_with_retry(path: &Path, is_dir: bool) -> Result<(), String> {
+    let mut last_error: Option<std::io::Error> = None;
+    for attempt in 0..5u32 {
+        let result = if is_dir {
+            tokio::fs::remove_dir(path).await
+        } else {
+            tokio::fs::remove_file(path).await
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt < 4 => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(last_error
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "重试后仍无法删除".into()))
 }
 
 fn show_window(app: &AppHandle) {
