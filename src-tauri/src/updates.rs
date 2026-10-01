@@ -213,8 +213,72 @@ impl UpdateManager {
             .filter(|value| value.to_lowercase().ends_with(".exe"))
             .unwrap_or("Sub2API.Setup.exe");
         let destination = cache.join(name);
+
+        // 直连 GitHub 下载失败时用 gh-proxy.org 代理兜底重试。api/digest 可能直连
+        // 正常，但真实文件经过 objects.githubusercontent.com CDN，被屏蔽时会中断，
+        // 因此单独给下载环节也加上代理回退。若用户已配置代理前缀则只走代理一次。
+        let candidate_urls: Vec<String> = if update.download_url.starts_with("https://github.com/")
+        {
+            vec![
+                update.download_url.clone(),
+                format!("https://gh-proxy.org/{}", update.download_url),
+            ]
+        } else {
+            vec![update.download_url.clone()]
+        };
+
+        let mut last_error: Option<String> = None;
+        let mut digest = String::new();
+        let mut transferred = 0u64;
+        for url in &candidate_urls {
+            match self
+                .attempt_download(app, url, &destination, &update.version)
+                .await
+            {
+                Ok((bytes, sha)) => {
+                    digest = sha;
+                    transferred = bytes;
+                    break;
+                }
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&destination).await;
+                    last_error = Some(error);
+                }
+            }
+        }
+        if digest.is_empty() {
+            return Err(last_error.unwrap_or_else(|| "下载更新失败。".into()));
+        }
+        if !digest.eq_ignore_ascii_case(update.sha256.trim()) {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err("更新文件 SHA-256 校验失败。".into());
+        }
+        *self.downloaded.lock().expect("downloaded path poisoned") = Some(destination);
+        self.set_state(
+            app,
+            UpdateUiState {
+                status: "downloaded".into(),
+                version: update.version.clone(),
+                percent: 100.0,
+                transferred,
+                total: transferred,
+                speed: 0,
+                message: "更新已下载完成。".into(),
+            },
+        );
+        show_window(app);
+        Ok(())
+    }
+
+    async fn attempt_download(
+        &self,
+        app: &AppHandle,
+        url: &str,
+        destination: &Path,
+        version: &str,
+    ) -> Result<(u64, String), String> {
         let response = update_client()?
-            .get(&update.download_url)
+            .get(url)
             .header(reqwest::header::USER_AGENT, "sub2api-account-usage-tauri")
             .send()
             .await
@@ -225,7 +289,7 @@ impl UpdateManager {
         if total > MAX_UPDATE_BYTES {
             return Err("更新文件超过 512 MB 安全限制。".into());
         }
-        let mut file = tokio::fs::File::create(&destination)
+        let mut file = tokio::fs::File::create(destination)
             .await
             .map_err(|error| format!("创建更新文件失败：{error}"))?;
         let mut stream = response.bytes_stream();
@@ -236,7 +300,7 @@ impl UpdateManager {
             app,
             UpdateUiState {
                 status: "downloading".into(),
-                version: update.version.clone(),
+                version: version.into(),
                 total,
                 message: "正在下载更新…".into(),
                 ..Default::default()
@@ -244,7 +308,7 @@ impl UpdateManager {
         );
         while let Some(chunk) = stream.next().await {
             if self.cancel.load(Ordering::SeqCst) {
-                let _ = tokio::fs::remove_file(&destination).await;
+                let _ = tokio::fs::remove_file(destination).await;
                 return Err("已取消".into());
             }
             let chunk = chunk.map_err(|error| format!("下载更新失败：{error}"))?;
@@ -261,7 +325,7 @@ impl UpdateManager {
                 app,
                 UpdateUiState {
                     status: "downloading".into(),
-                    version: update.version.clone(),
+                    version: version.into(),
                     percent: if total > 0 {
                         transferred as f64 * 100.0 / total as f64
                     } else {
@@ -275,32 +339,14 @@ impl UpdateManager {
             );
         }
         if self.cancel.load(Ordering::SeqCst) {
-            let _ = tokio::fs::remove_file(&destination).await;
+            let _ = tokio::fs::remove_file(destination).await;
             return Err("已取消".into());
         }
         file.flush()
             .await
             .map_err(|error| format!("保存更新文件失败：{error}"))?;
-        let actual = format!("{:x}", hasher.finalize());
-        if !actual.eq_ignore_ascii_case(update.sha256.trim()) {
-            let _ = tokio::fs::remove_file(&destination).await;
-            return Err("更新文件 SHA-256 校验失败。".into());
-        }
-        *self.downloaded.lock().expect("downloaded path poisoned") = Some(destination);
-        self.set_state(
-            app,
-            UpdateUiState {
-                status: "downloaded".into(),
-                version: update.version.clone(),
-                percent: 100.0,
-                transferred,
-                total,
-                speed: 0,
-                message: "更新已下载完成。".into(),
-            },
-        );
-        show_window(app);
-        Ok(())
+        let digest = format!("{:x}", hasher.finalize());
+        Ok((transferred, digest))
     }
 
     fn set_state(&self, app: &AppHandle, state: UpdateUiState) {
