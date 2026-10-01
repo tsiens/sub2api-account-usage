@@ -132,7 +132,7 @@ code { color: var(--accent); }
 .codex-actions { display: flex; gap: 10px; align-items: center; }
 .codex-save { margin-top: 22px; }
 .codex-save .primary-button { width: 100%; }
-.model-tree { max-height: 380px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.model-tree { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 .model-file { margin-bottom: 6px; }
 .model-file summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; display: flex; align-items: center; gap: 6px; list-style: none; }
 .model-file summary::-webkit-details-marker { display: none; }
@@ -140,8 +140,9 @@ code { color: var(--accent); }
 .model-file[open] > summary::before { transform: rotate(90deg); }
 .file-check, .model-row { display: flex; align-items: center; gap: 6px; }
 .model-row { margin: 4px 0 0 18px; font-size: 12px; }
+.model-row > span { display: inline; white-space: nowrap; }
 .model-row input, .file-check input { width: auto; margin: 0; accent-color: var(--accent); }
-.model-row .legacy-source { color: var(--muted); font-size: 11px; margin-left: 2px; }
+.model-row .legacy-source { display: inline; color: var(--muted); font-size: 11px; margin-left: 2px; margin-top: 0; white-space: nowrap; }
 .model-loading, .model-error, .model-empty { color: var(--muted); font-size: 12px; padding: 6px; }
 .model-error { color: var(--red); }
 .link-button { border: 0; padding: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }

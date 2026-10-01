@@ -46,7 +46,7 @@ pub fn open_codex_config() -> Result<(), String> {
 }
 
 fn app_data_dir(app: &str) -> PathBuf {
-    data_directory().join("apps").join(app)
+    data_directory().join("provider").join(app)
 }
 
 fn models_path() -> PathBuf {
@@ -55,18 +55,22 @@ fn models_path() -> PathBuf {
         .unwrap_or_else(|| app_data_dir("codex").join("models.json"))
 }
 
-fn models_dir_path() -> Result<PathBuf, String> {
-    // 打包后，模型源文件位于 exe 同目录的 _up_/models 下（Tauri 资源目录）。
-    // 用 current_exe 获取可执行文件真实路径，避免依赖 PathResolver 的路径解析差异。
+/// 模型网络 source 的本地缓存文件，供模型树展示时快速读取，
+/// 避免每次切换标签页都实时拉取网络。
+fn sources_cache_path() -> PathBuf {
+    app_data_dir("codex").join("sources-cache.json")
+}
+
+/// 打包后，模型清单文件位于 exe 同目录的 _up_/models.json（Tauri 资源目录）。
+/// 用 current_exe 获取可执行文件真实路径，避免依赖 PathResolver 的路径解析差异。
+fn models_manifest_path() -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe().map_err(|error| format!("获取可执行文件路径失败：{error}"))?;
-    let dir = exe
+    Ok(exe
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("_up_")
-        .join("models");
-    append_log(&format!("models dir: {dir:?} exists={}", dir.exists()));
-    Ok(dir)
+        .join("models.json"))
 }
 
 fn app_backups_dir(app: &str) -> Result<PathBuf, String> {
@@ -241,46 +245,53 @@ fn read_json(path: &Path) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn list_model_files() -> Result<Value, String> {
-    let dir = models_dir_path()?;
-    append_log(&format!(
-        "list_model_files: {dir:?} exists={}",
-        dir.exists()
-    ));
-    if !dir.exists() {
-        return Ok(json!([]));
-    }
+pub async fn list_model_files() -> Result<Value, String> {
+    let manifest = read_manifest()?;
+    let suppliers = manifest.as_array().cloned().unwrap_or_default();
     let mut files = Vec::new();
-    let mut entries: Vec<_> = fs::read_dir(&dir)
-        .map_err(|error| error.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let content = read_json(&path)?;
-        let group = name
-            .split('-')
-            .next()
-            .map(str::to_string)
-            .unwrap_or_else(|| name.clone());
-        // 为每个模型对象注入来源字段，用于在多源文件间唯一锁定同名模型。
-        let mut content = content;
-        if let Some(models) = content.get_mut("models").and_then(|v| v.as_array_mut()) {
-            for model in models {
-                if let Some(obj) = model.as_object_mut() {
-                    obj.insert("sub2api_source".into(), json!(name));
+    for (index, supplier) in suppliers.iter().enumerate() {
+        let name = supplier
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&format!("供应商{}", index + 1))
+            .to_string();
+        let provider = supplier
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("codex")
+            .to_string();
+        let source = supplier
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let mut error: Option<String> = None;
+        let models = if !source.is_empty() {
+            match supplier_models(supplier).await {
+                Ok(models) => models,
+                Err(err) => {
+                    error = Some(err);
+                    Vec::new()
                 }
             }
+        } else {
+            normalize_models(supplier)
+        };
+
+        // 为每个模型注入来源（供应商名），用于唯一锁定同名模型。
+        let mut content_models: Vec<Value> = Vec::new();
+        for mut model in models {
+            if let Some(obj) = model.as_object_mut() {
+                obj.insert("sub2api_source".into(), json!(name));
+            }
+            content_models.push(model);
         }
+
         files.push(json!({
             "name": name,
-            "group": group,
-            "content": content,
+            "group": provider,
+            "content": json!({ "models": content_models }),
+            "error": error,
         }));
     }
     Ok(json!(files))
@@ -298,7 +309,7 @@ pub fn read_models() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn save_models(models: Value) -> Result<(), String> {
+pub async fn save_models(models: Value) -> Result<(), String> {
     let path = models_path();
 
     // 勾选条目：支持两种形式——
@@ -332,29 +343,31 @@ pub fn save_models(models: Value) -> Result<(), String> {
         })
         .unwrap_or_default();
 
-    // 读取所有源文件，建立 (source, slug) -> 完整模型对象 的映射。
-    let dir = models_dir_path()?;
+    // 读取模型清单，建立 (source, slug) -> 完整模型对象 的映射。
+    // 对带 source 的条目先网络拉取最新，失败回退到内联 models。
     let mut by_slug: std::collections::HashMap<(String, String), Value> =
         std::collections::HashMap::new();
-    if dir.exists() {
-        for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+    let manifest = read_manifest()?;
+    for supplier in manifest.as_array().cloned().unwrap_or_default() {
+        let name = supplier
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let models = supplier_models(&supplier).await?;
+        for mut item in models {
+            let slug = item
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if slug.is_empty() {
                 continue;
             }
-            let source = entry.file_name().to_string_lossy().to_string();
-            let content = read_json(&path)?;
-            let items = content
-                .get("models")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for item in items {
-                if let Some(slug) = item.get("slug").and_then(|v| v.as_str()) {
-                    by_slug.insert((source.clone(), slug.to_string()), item.clone());
-                }
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("sub2api_source".into(), json!(name));
             }
+            by_slug.insert((name.clone(), slug.clone()), item.clone());
         }
     }
 
@@ -520,4 +533,190 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, content).map_err(|error| format!("写入失败：{error}"))?;
     fs::rename(&tmp, path).map_err(|error| format!("替换文件失败：{error}"))
+}
+
+/// 读取打包携带的模型清单 models.json。
+fn read_manifest() -> Result<Value, String> {
+    let path = models_manifest_path()?;
+    append_log(&format!(
+        "models manifest: {path:?} exists={}",
+        path.exists()
+    ));
+    if !path.exists() {
+        return Ok(json!([]));
+    }
+    read_json(&path)
+}
+
+/// 归一化一条清单条目里的模型数组。
+fn normalize_models(content: &Value) -> Vec<Value> {
+    let array = if let Some(arr) = content.as_array() {
+        arr.clone()
+    } else if let Some(arr) = content.get("models").and_then(|v| v.as_array()) {
+        arr.clone()
+    } else {
+        Vec::new()
+    };
+    // 兼容深层结构：某些 source 返回 { "models": { ... } } 之类的嵌套对象。
+    array
+        .into_iter()
+        .flat_map(|v| {
+            if let Some(arr) = v.as_array() {
+                arr.clone()
+            } else {
+                vec![v]
+            }
+        })
+        .collect()
+}
+
+/// 从网络地址拉取模型文件内容。对于 github.com / raw.githubusercontent.com 的地址，
+/// 直连失败后自动用 gh-proxy.org 前缀重试。
+async fn fetch_remote_models(source: &str) -> Result<Value, String> {
+    let candidate_urls: Vec<String> =
+        if source.contains("github.com") || source.contains("raw.githubusercontent.com") {
+            vec![source.to_string(), format!("https://gh-proxy.org/{source}")]
+        } else {
+            vec![source.to_string()]
+        };
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("创建网络客户端失败：{error}"))?;
+
+    let mut last_error: Option<String> = None;
+    for url in candidate_urls {
+        match fetch_remote_once(&client, &url).await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "拉取模型数据失败。".into()))
+}
+
+async fn fetch_remote_once(client: &reqwest::Client, url: &str) -> Result<Value, String> {
+    use reqwest::header::USER_AGENT;
+    let response = client
+        .get(url)
+        .header(USER_AGENT, "sub2api-account-usage-tauri")
+        .send()
+        .await
+        .map_err(|error| format!("拉取模型数据失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("拉取模型数据失败：{error}"))?;
+    response
+        .json()
+        .await
+        .map_err(|error| format!("解析模型数据失败：{error}"))
+}
+
+/// 返回某供应商条目对应的模型数组。有 source 时优先网络拉取最新；失败回退到
+/// 条目内联的 models（本地内置数据）。
+async fn supplier_models(supplier: &Value) -> Result<Vec<Value>, String> {
+    let source = supplier
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let inline = normalize_models(supplier);
+    let name = supplier.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if !source.is_empty() {
+        // 优先使用缓存中已拉取的最新模型，避免每次切换标签页都访问网络。
+        if let Some(cached) = cached_supplier_models(name) {
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+        // 缓存缺失时实时拉取一次作为兜底。
+        match fetch_remote_models(source).await {
+            Ok(content) => {
+                let remote = normalize_models(&content);
+                if !remote.is_empty() {
+                    return Ok(remote);
+                }
+            }
+            Err(error) => append_log(&format!("模型网络拉取失败（{source}）：{error}")),
+        }
+    }
+    Ok(inline)
+}
+
+/// 读取某个供应商的缓存模型（sources-cache.json），无缓存则返回 None。
+fn cached_supplier_models(name: &str) -> Option<Vec<Value>> {
+    let path = sources_cache_path();
+    let text = fs::read_to_string(&path).ok()?;
+    let cache: Value = serde_json::from_str(&text).ok()?;
+    let suppliers = cache.get("suppliers")?.as_array()?;
+    for supplier in suppliers {
+        if supplier.get("name").and_then(|v| v.as_str()) == Some(name) {
+            let models = supplier.get("models")?.as_array()?.clone();
+            if !models.is_empty() {
+                return Some(models);
+            }
+        }
+    }
+    None
+}
+
+/// 拉取清单中所有带 source 的供应商模型并写入本地缓存。
+/// 程序启动和“检查更新”时调用一次，与更新检查节奏保持一致。
+pub async fn refresh_model_sources() {
+    let manifest = match read_manifest() {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            append_log(&format!("刷新模型 source 失败：{error}"));
+            return;
+        }
+    };
+    let suppliers = manifest.as_array().cloned().unwrap_or_default();
+    let mut cache_suppliers = Vec::new();
+    for supplier in &suppliers {
+        let name = supplier
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let source = supplier
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut entry = json!({ "name": name });
+        if source.is_empty() {
+            let models = normalize_models(supplier);
+            if !models.is_empty() {
+                entry["models"] = json!(models);
+            }
+        } else {
+            match fetch_remote_models(source).await {
+                Ok(content) => {
+                    let models = normalize_models(&content);
+                    entry["models"] = json!(models);
+                }
+                Err(error) => {
+                    append_log(&format!("模型 source 拉取失败（{name}）：{error}"));
+                    // 拉取失败时保留本地内联 models 作为兜底。
+                    let inline = normalize_models(supplier);
+                    if !inline.is_empty() {
+                        entry["models"] = json!(inline);
+                    }
+                }
+            }
+        }
+        cache_suppliers.push(entry);
+    }
+    if let Some(parent) = sources_cache_path().parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let payload = json!({
+        "updated_at": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "suppliers": cache_suppliers,
+    });
+    if let Err(error) = fs::write(sources_cache_path(), payload.to_string()) {
+        append_log(&format!("写入模型 source 缓存失败：{error}"));
+    }
+    append_log("模型 source 已刷新并写入缓存");
 }

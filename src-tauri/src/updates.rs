@@ -73,6 +73,9 @@ impl UpdateManager {
             return;
         }
         append_log(&format!("开始检查更新（manual={manual}）"));
+        // 与更新检查同步刷新所有模型 source 缓存（程序启动、点“检查更新”、
+        // 定时检查都会进入此入口）。
+        tauri::async_runtime::spawn(crate::codex::refresh_model_sources());
         // Reset the cancel flag so a brand-new run never inherits a stale cancellation.
         self.cancel.store(false, Ordering::SeqCst);
         *self.downloaded.lock().expect("downloaded path poisoned") = None;

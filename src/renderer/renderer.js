@@ -1,5 +1,8 @@
 'use strict';
 
+// 屏蔽 WebView 默认右键菜单（刷新、更多工具等）。
+document.addEventListener('contextmenu', (event) => event.preventDefault());
+
 const $ = (id) => document.getElementById(id);
 let pending2fa = null;
 let lastConfigKey = '';
@@ -232,7 +235,7 @@ async function initCodex() {
   } catch (error) {
     toast(error.message || '读取 Codex 配置失败');
   }
-  await refreshModelTree(false);
+  await refreshModelTree();
   renderBackups();
 }
 
@@ -241,7 +244,7 @@ function extractBearerToken(toml) {
   return match ? match[1] : '';
 }
 
-async function refreshModelTree(forcibly) {
+async function refreshModelTree() {
   const treeEl = $('modelTree');
   treeEl.innerHTML = '<div class="model-loading">加载中...</div>';
   try {
@@ -282,22 +285,25 @@ async function renderModelTree(files, ownModels) {
     html += `<details class="model-file" open><summary><label class="file-check"><input type="checkbox" data-filecheck="${escapeHtml(fileKey)}"><span>${escapeHtml(fileKey)}</span></label></summary>${rows || '<div class="model-empty">无模型</div>'}</details>`;
   }
   // 无法溯源的旧模型
+  // 可溯源集合：来源名 + 模型标识 都精确匹配才算有对应供应商。
+  // 旧版本保存的来源是文件名（codex.json/deepseek.json），与新供应商名
+  // （Codex/DeepSeek）不一致，这类模型会被判定为无法溯源并单独显示出来。
   const known = new Set();
-  codexModelTree.forEach((f) => f.models.forEach((m) => known.add(m.id)));
+  codexModelTree.forEach((f) => f.models.forEach((m) => known.add(`${m.source}\u0000${m.id}`)));
   const legacy = (ownModels || []).filter((m) => {
     const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
-    // 无法溯源：当前任何来源文件里都没有该模型（无论是否带有 sub2api_source）。
-    return id && !known.has(id);
+    // 无法溯源：来源名与模型标识无法共同对应到任何供应商。
+    return id && !known.has(`${m?.sub2api_source || ''}\u0000${id}`);
   });
   if (legacy.length) {
     const rows = legacy.map((m) => {
       const id = String(m?.modelName || m?.slug || m?.id || JSON.stringify(m)).trim();
-      const source = m?.sub2api_source || '';
+      const source = String(m?.sub2api_source || '');
       const checked = savedSet.has(`${source}\u0000${id}`) ? ' checked' : '';
       const sourceLabel = source ? ` <small class="legacy-source">(${escapeHtml(source)})</small>` : '';
       return `<label class="model-row"><input type="checkbox"${checked} data-file="旧文件" data-source="${escapeHtml(source)}" data-model="${escapeHtml(id)}"><span title="${escapeHtml(id)}">${escapeHtml(id)}${sourceLabel}</span></label>`;
     }).join('');
-    html += `<details class="model-file legacy"><summary><label class="file-check"><input type="checkbox" data-filecheck="旧文件"><span>无法溯源</span></label></summary>${rows}</details>`;
+    html += `<details class="model-file legacy" open><summary><label class="file-check"><input type="checkbox" data-filecheck="旧文件"><span>无法溯源</span></label></summary>${rows}</details>`;
   }
   treeEl.innerHTML = html;
 
