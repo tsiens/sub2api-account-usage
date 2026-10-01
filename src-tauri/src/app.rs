@@ -741,7 +741,7 @@ fn start_timers(app: AppHandle, runtime: Arc<RuntimeState>) {
     let update_runtime = runtime;
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
             update_runtime
                 .updates
                 .start(update_app.clone(), DEFAULT_UPDATE_URL.into(), false);
