@@ -691,12 +691,20 @@ fn start_timers(app: AppHandle, runtime: Arc<RuntimeState>) {
                 .accounts
                 .len();
             if count > 1 {
-                rotation_runtime
-                    .rotation_index
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |index| {
-                        Some((index + 1) % count)
-                    })
-                    .ok();
+                let index = &rotation_runtime.rotation_index;
+                let mut current = index.load(Ordering::SeqCst);
+                loop {
+                    let next = (current % count + 1) % count;
+                    match index.compare_exchange_weak(
+                        current,
+                        next,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => current = actual,
+                    }
+                }
                 update_tray_tooltip(&rotation_app, &rotation_runtime);
             }
         }
