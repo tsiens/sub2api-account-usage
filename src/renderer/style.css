@@ -127,11 +127,18 @@ code { color: var(--accent); }
 .codex-head .icon-button { margin-left: auto; }
 .codex-note { color: var(--muted); font-size: 12px; margin: 8px 0 14px; }
 .codex-note code { color: var(--accent); }
+.codex-streaming { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.codex-streaming input { appearance: none; width: 32px; height: 18px; margin: 0; padding: 2px; border: 0; border-radius: 9px; background: #475569; cursor: pointer; }
+.codex-streaming input::before { content: ''; display: block; width: 14px; height: 14px; border-radius: 50%; background: white; transition: transform .15s; }
+.codex-streaming input:checked { background: var(--accent); }
+.codex-streaming input:checked::before { transform: translateX(14px); }
+.codex-streaming input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .codex-field { margin-bottom: 14px; }
 .codex-field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .codex-actions { display: flex; gap: 10px; align-items: center; }
-.codex-save { margin-top: 22px; }
-.codex-save .primary-button { width: 100%; }
+.codex-save { display: flex; gap: 10px; margin-top: 22px; }
+.codex-save .primary-button { flex: 1; }
+.codex-save .danger-button { width: auto; margin: 0; }
 .model-tree { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 .model-file { margin-bottom: 6px; }
 .model-file summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; display: flex; align-items: center; gap: 6px; list-style: none; }

@@ -387,6 +387,7 @@ pub fn run() {
             show_float_menu,
             crate::codex::get_codex_config,
             crate::codex::open_codex_config,
+            crate::codex::restart_codex,
             crate::codex::save_codex_config,
             crate::codex::prepare_models,
             crate::codex::list_model_files,

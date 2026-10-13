@@ -231,7 +231,9 @@ function updateCodexEnabled(baseUrl) {
 async function initCodex() {
   try {
     const config = await window.sub2api.getCodexConfig();
-    $('codexBearerToken').value = extractBearerToken(config);
+    const provider = config.match(/^[ \t]*\[model_providers\.sub2api\][ \t]*(?:#[^\r\n]*)?\r?\n([\s\S]*?)(?=^[ \t]*\[|(?![\s\S]))/m)?.[1] || '';
+    $('codexBearerToken').value = extractBearerToken(provider);
+    $('codexSupportsWebsockets').checked = /^[ \t]*supports_websockets\s*=\s*true\s*(?:#.*)?$/m.test(provider);
   } catch (error) {
     toast(error.message || '读取 Codex 配置失败');
   }
@@ -348,7 +350,7 @@ async function saveCodexConfig() {
   const config = (await window.sub2api.getState());
   const baseUrl = config.config?.baseUrl || '';
   const token = $('codexBearerToken').value.trim();
-  await window.sub2api.saveCodexConfig({ baseUrl, bearerToken: token });
+  await window.sub2api.saveCodexConfig({ baseUrl, bearerToken: token, supportsWebsockets: $('codexSupportsWebsockets').checked });
 }
 
 async function saveModels() {
@@ -375,6 +377,20 @@ async function saveCodex() {
 
 $('openCodexConfig').addEventListener('click', () => window.sub2api.openCodexConfig().catch((e) => toast(e.message || '打开失败')));
 $('saveCodex').addEventListener('click', saveCodex);
+$('restartCodex').addEventListener('click', async () => {
+  const button = $('restartCodex');
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = '重启中…';
+  try {
+    toast(await window.sub2api.restartCodex());
+  } catch (error) {
+    toast(error.message || '重启 Codex 失败');
+  } finally {
+    button.disabled = false;
+    button.textContent = '重启';
+  }
+});
 
 function formatBackupTime(name) {
   const match = name.match(/(\d+)\.bak$/);

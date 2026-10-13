@@ -41,6 +41,7 @@
     openAdminPage: () => invoke('open_admin_page'),
     getCodexConfig: () => invoke('get_codex_config'),
     openCodexConfig: () => invoke('open_codex_config'),
+    restartCodex: () => invoke('restart_codex'),
     saveCodexConfig: (values) => invoke('save_codex_config', values),
     prepareModels: () => invoke('prepare_models'),
     listModelFiles: () => invoke('list_model_files'),

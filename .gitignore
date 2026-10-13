@@ -1,6 +1,7 @@
 # Dependencies / tooling
 node_modules/
 src-tauri/target/
+xtask/target/
 src-tauri/gen/schemas/
 release/
 release-*/
@@ -25,4 +26,4 @@ dist/
 Thumbs.db
 
 # Local editor state
-.vscode-test/
+AGENTS.md

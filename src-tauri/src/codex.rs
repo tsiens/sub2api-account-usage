@@ -11,6 +11,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const CODEX_CONFIG_REL: &str = ".codex/config.toml";
 
+#[tauri::command]
+pub async fn restart_codex() -> Result<String, String> {
+    tokio::task::spawn_blocking(crate::codex_desktop::restart)
+        .await
+        .map_err(|error| format!("重启 Codex 任务失败：{error}"))?
+}
+
 fn codex_config_path() -> Result<PathBuf, String> {
     dirs::home_dir()
         .map(|home| home.join(CODEX_CONFIG_REL))
@@ -100,9 +107,12 @@ pub fn prepare_models() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), String> {
+pub fn save_codex_config(
+    base_url: String,
+    bearer_token: String,
+    supports_websockets: bool,
+) -> Result<(), String> {
     let config_path = codex_config_path()?;
-    let catalog = "~/.codex/models.json".to_string();
     let original = if config_path.exists() {
         fs::read_to_string(&config_path)
             .map_err(|error| format!("读取 config.toml 失败：{error}"))?
@@ -110,8 +120,24 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         String::new()
     };
 
+    let (candidate, changed) =
+        merge_codex_config(&original, &base_url, &bearer_token, supports_websockets);
+    if changed {
+        write_atomic(&config_path, &candidate)?;
+        back_up_content(&candidate, "codex", "config")
+    } else {
+        Ok(())
+    }
+}
+
+fn merge_codex_config(
+    original: &str,
+    base_url: &str,
+    bearer_token: &str,
+    supports_websockets: bool,
+) -> (String, bool) {
     let base = base_url.trim_end_matches('/');
-    let catalog_val = format!("\"{catalog}\"");
+    let catalog_val = "\"~/.codex/models.json\"";
 
     let lines: Vec<&str> = original.lines().collect();
     let first_table = lines
@@ -127,7 +153,7 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         let line = *line;
         let trimmed = line.trim();
         let indent = &line[..line.len() - trimmed.len()];
-        let updated = root_value(trimmed, &catalog_val);
+        let updated = root_value(trimmed, catalog_val);
         if let Some((key, value)) = updated {
             seen_root.push(key);
             out.push_str(&format!("{indent}{key} = {value}\n"));
@@ -137,23 +163,24 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         }
     }
     // 补齐缺失的 root 键。
-    for (key, value) in root_entries(&catalog_val) {
+    for (key, value) in root_entries(catalog_val) {
         if !seen_root.contains(&key) {
             out.push_str(&format!("{key} = {value}\n"));
         }
     }
 
-    // 处理从第一个表头开始的其余部分：定位并更新 provider 表的两行，其余原样。
+    // 更新供应商连接配置，其余表原样保留。
     let mut in_provider = false;
     let mut seen_provider = false;
-    // 备份与否由 experimental_bearer_token 是否变化决定。
+    let mut seen_websockets = false;
+    // API Key 或流式支持变化时写入并备份。
     let mut changed = false;
     let mut old_token = String::new();
     for line in lines.iter().skip(first_table) {
         let line = *line;
         let trimmed = line.trim();
         let indent = &line[..line.len() - trimmed.len()];
-        if trimmed == "[model_providers.sub2api]" {
+        if trimmed.split('#').next().unwrap_or("").trim() == "[model_providers.sub2api]" {
             in_provider = true;
             seen_provider = true;
             out.push_str(line);
@@ -162,7 +189,23 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         }
         if in_provider {
             if trimmed.starts_with('[') {
+                if !seen_websockets {
+                    out.push_str(&format!("supports_websockets = {supports_websockets}\n"));
+                    changed = true;
+                }
                 in_provider = false;
+            } else if trimmed.split('=').next().map(str::trim) == Some("supports_websockets") {
+                seen_websockets = true;
+                let previous = trimmed
+                    .split_once('=')
+                    .map(|(_, value)| value.split('#').next().unwrap_or("").trim());
+                if previous != Some(if supports_websockets { "true" } else { "false" }) {
+                    changed = true;
+                }
+                out.push_str(&format!(
+                    "{indent}supports_websockets = {supports_websockets}\n"
+                ));
+                continue;
             } else if trimmed.starts_with("base_url") {
                 out.push_str(&format!("{indent}base_url = \"{base}/v1\"\n"));
                 continue;
@@ -185,6 +228,11 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         out.push('\n');
     }
 
+    if in_provider && !seen_websockets {
+        out.push_str(&format!("supports_websockets = {supports_websockets}\n"));
+        changed = true;
+    }
+
     // provider 表原本不存在时整体插入。
     if !seen_provider {
         changed = true;
@@ -196,15 +244,11 @@ pub fn save_codex_config(base_url: String, bearer_token: String) -> Result<(), S
         out.push_str(&format!("base_url = \"{base}/v1\"\n"));
         out.push_str(&format!("experimental_bearer_token = \"{bearer_token}\"\n"));
         out.push_str("wire_api = \"responses\"\n");
+        out.push_str(&format!("supports_websockets = {supports_websockets}\n"));
     }
 
     let candidate = if out.ends_with('\n') { out } else { out + "\n" };
-    if changed {
-        write_atomic(&config_path, &candidate)?;
-        back_up_content(&candidate, "codex", "config")
-    } else {
-        Ok(())
-    }
+    (candidate, changed)
 }
 
 fn root_value<'a>(trimmed: &str, catalog_val: &'a str) -> Option<(&'static str, &'a str)> {
@@ -719,4 +763,62 @@ pub async fn refresh_model_sources() {
         append_log(&format!("写入模型 source 缓存失败：{error}"));
     }
     append_log("模型 source 已刷新并写入缓存");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_codex_config;
+
+    #[test]
+    fn creates_provider_with_selected_websocket_support() {
+        for enabled in [false, true] {
+            let (config, changed) = merge_codex_config(
+                "model = \"keep-model\"\n[windows]\nsandbox = \"elevated\"\n",
+                "https://example.com",
+                "test-key",
+                enabled,
+            );
+            assert!(changed);
+            assert!(config.contains("model = \"keep-model\"\n"));
+            assert!(config.contains(&format!(
+                "[model_providers.sub2api]\nname = \"AI\"\nbase_url = \"https://example.com/v1\"\nexperimental_bearer_token = \"test-key\"\nwire_api = \"responses\"\nsupports_websockets = {enabled}\n"
+            )));
+        }
+    }
+
+    #[test]
+    fn inserts_missing_support_inside_provider_and_does_not_repeat_backup() {
+        for following_table in ["", "\n[windows]\nsandbox = \"elevated\"\n"] {
+            let original = format!(
+                "[model_providers.sub2api] # provider\nexperimental_bearer_token = \"test-key\"\n{following_table}"
+            );
+            let (config, changed) =
+                merge_codex_config(&original, "https://example.com", "test-key", false);
+            assert!(changed);
+            let provider = config.split("[windows]").next().unwrap();
+            assert!(provider.contains("supports_websockets = false\n"));
+            assert_eq!(config.matches("supports_websockets").count(), 1);
+            let (_, changed_again) =
+                merge_codex_config(&config, "https://example.com", "test-key", false);
+            assert!(!changed_again);
+        }
+    }
+
+    #[test]
+    fn changes_support_without_changing_key_or_other_provider() {
+        let original = "[model_providers.other]\nsupports_websockets = true\n[model_providers.sub2api]\nexperimental_bearer_token = \"test-key\"\nsupports_websockets = false # disabled\n[windows]\nsandbox = \"elevated\"\n";
+        let (enabled, changed) =
+            merge_codex_config(original, "https://example.com", "test-key", true);
+        assert!(changed);
+        assert!(enabled.contains("[model_providers.other]\nsupports_websockets = true\n"));
+        assert!(enabled.contains("supports_websockets = true\n[windows]"));
+        assert!(enabled.contains("experimental_bearer_token = \"test-key\"\n"));
+        let (disabled, changed) =
+            merge_codex_config(&enabled, "https://example.com", "test-key", false);
+        assert!(changed);
+        assert!(disabled.contains("supports_websockets = false\n[windows]"));
+        let (_, changed_again) =
+            merge_codex_config(&disabled, "https://example.com", "test-key", false);
+        assert!(!changed_again);
+    }
 }

@@ -1,4 +1,5 @@
 name: Release Windows App
+run-name: ${{ github.ref_name }}
 
 on:
   push:
@@ -25,6 +26,9 @@ jobs:
   release:
     needs: audit
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,143 +41,52 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install Tauri CLI
-        shell: pwsh
         run: cargo install tauri-cli --version 2.11.4 --locked
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            xtask
 
       - name: Verify tag matches package version
-        shell: pwsh
-        run: |
-          $tagVersion = $env:GITHUB_REF_NAME.Substring(1)
-          $tauriVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
-          if ($tagVersion -ne $tauriVersion) {
-            throw "Tag version $tagVersion does not match src-tauri/tauri.conf.json version $tauriVersion"
-          }
-          $cargoVersion = (Select-String -LiteralPath 'src-tauri/Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          if ($tagVersion -ne $cargoVersion) {
-            throw "Tag version $tagVersion does not match src-tauri/Cargo.toml version $cargoVersion"
-          }
+        run: cargo xtask verify-tag
 
       - name: Rust format check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo fmt --manifest-path xtask/Cargo.toml -- --check
 
       - name: Rust check
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Rust tests
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+          cargo test --locked --manifest-path xtask/Cargo.toml --all-targets
 
       - name: Rust lint
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Windows installer
-        run: cargo tauri build --bundles nsis
+        run: cargo xtask build --skip-install
 
       - name: Prepare release assets
-        shell: pwsh
-        run: |
-          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
-          $installer = Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if (-not $installer) {
-            throw 'No Tauri NSIS installer was found'
-          }
-          New-Item -ItemType Directory -Path 'release' -Force | Out-Null
-          $target = "release/Sub2API.Setup.$version.exe"
-          Copy-Item -LiteralPath $installer.FullName -Destination $target
+        run: cargo xtask prepare-release
 
       - name: Sign installer when certificate is configured
-        shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
-            Write-Host 'No signing certificate configured; checksum verification remains mandatory.'
-            exit 0
-          }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw 'WINDOWS_CERTIFICATE_PASSWORD is required when a signing certificate is configured'
-          }
-          $certificate = Join-Path $env:RUNNER_TEMP 'sub2api-signing.pfx'
-          try {
-            [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-            $signTool = Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\bin' -Filter 'signtool.exe' -File -Recurse |
-              Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1
-            if (-not $signTool) {
-              throw 'signtool.exe was not found on the runner'
-            }
-            $installer = Get-ChildItem -LiteralPath 'release' -Filter '*.exe' -File | Select-Object -First 1
-            & $signTool.FullName sign /fd SHA256 /td SHA256 /tr 'http://timestamp.digicert.com' /f $certificate /p $env:WINDOWS_CERTIFICATE_PASSWORD $installer.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed' }
-            & $signTool.FullName verify /pa /v $installer.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed' }
-          } finally {
-            Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
-          }
+        run: cargo xtask sign
 
       - name: Generate installer checksum
-        shell: pwsh
-        run: |
-          $target = Get-ChildItem -LiteralPath 'release' -Filter '*.exe' -File | Select-Object -First 1
-          if (-not $target) { throw 'No prepared installer was found' }
-          $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath "$($target.FullName).sha256" -Value "$hash  $($target.Name)" -Encoding ascii
+        run: cargo xtask checksum
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          $assets = @(Get-ChildItem -LiteralPath 'release' -File | Where-Object {
-            $_.Name -match '^Sub2API\.Setup\.[0-9]+\.[0-9]+\.[0-9]+\.exe(?:\.sha256)?$'
-          } | ForEach-Object { $_.FullName })
-          if ($assets.Count -eq 0) {
-            throw 'No Windows build assets were found in release'
-          }
-          # actions/checkout overwrites the tag ref with a direct ref to the commit, which
-          # hides the annotated tag object. Fetch it back before reading the release notes.
-          $tagRef = "refs/tags/${env:GITHUB_REF_NAME}:refs/tags/${env:GITHUB_REF_NAME}"
-          git fetch --force --no-tags origin $tagRef 2>$null
-          $tagType = git cat-file -t $env:GITHUB_REF_NAME
-          if ($tagType -ne 'tag') {
-            throw "Release tag $env:GITHUB_REF_NAME must be an annotated tag with release notes"
-          }
-          $releaseNotes = (git for-each-ref "refs/tags/$env:GITHUB_REF_NAME" --format='%(contents)' | Out-String).Trim()
-          if (-not $releaseNotes) {
-            throw "Release tag $env:GITHUB_REF_NAME does not contain release notes"
-          }
-          $releaseNotes = [regex]::Replace($releaseNotes, '^\s*发布\s+v[^\r\n]+\s*(?:\r?\n)+', '')
-          $releaseNotes = [regex]::Replace($releaseNotes, '(?m)^变更：[ \t]*\r?$', "## 变更`n")
-          $releaseId = gh release view $env:GITHUB_REF_NAME --json id --jq '.id' 2>$null
-          if ($LASTEXITCODE -eq 0 -and $releaseId) {
-            $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding utf8 | ConvertFrom-Json).version
-            $installerName = "Sub2API.Setup.$version.exe"
-            $checksumName = "Sub2API.Setup.$version.exe.sha256"
-            $existingAssets = @(gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name')
-            if ($existingAssets -notcontains $installerName -or $existingAssets -notcontains $checksumName) {
-              throw "Existing Release is incomplete; remove it manually before rebuilding"
-            }
-            $downloadDirectory = Join-Path $env:RUNNER_TEMP 'existing-release'
-            New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
-            gh release download $env:GITHUB_REF_NAME --pattern $checksumName --dir $downloadDirectory --clobber
-            if ($LASTEXITCODE -ne 0) {
-              throw "Existing Release has no checksum asset; remove it manually before rebuilding"
-            }
-            $existingHash = ((Get-Content -LiteralPath (Join-Path $downloadDirectory $checksumName) -Raw).Trim() -split '\s+')[0]
-            $localHash = ((Get-Content -LiteralPath "release/$checksumName" -Raw).Trim() -split '\s+')[0]
-            if ($existingHash -ne $localHash) {
-              throw "Release $env:GITHUB_REF_NAME already exists with a different installer. Publish a new version instead of replacing it."
-            }
-            gh release edit $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --notes $releaseNotes
-            Write-Host 'Existing immutable Release matches this build; no assets were replaced.'
-          } else {
-            gh release create $env:GITHUB_REF_NAME $assets --title $env:GITHUB_REF_NAME --notes $releaseNotes
-          }
+        run: cargo xtask publish

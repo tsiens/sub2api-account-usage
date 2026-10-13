@@ -54,6 +54,7 @@
         <div class="codex-section">
           <div class="codex-head"><h2>配置</h2></div>
           <p class="codex-note">将 Codex 连接信息写入 <button type="button" class="link-button" id="openCodexConfig"><code>~/.codex/config.toml</code></button>，合并保留原有内容。</p>
+          <label class="codex-streaming"><span>流式支持</span><input id="codexSupportsWebsockets" type="checkbox" role="switch"></label>
           <div class="codex-field">
             <label>API Key</label>
             <input id="codexBearerToken" type="password" placeholder="输入 API Key" autocomplete="off">
@@ -64,7 +65,7 @@
           <div class="codex-head"><h2>模型</h2></div>
           <div id="modelTree" class="model-tree"></div>
         </div>
-        <div class="codex-save"><button class="primary-button" id="saveCodex">保存</button></div>
+        <div class="codex-save"><button class="primary-button" id="saveCodex">保存</button><button class="danger-button" id="restartCodex" title="重启 Codex 桌面应用，会中断正在进行的任务">重启</button></div>
         <div class="codex-section">
           <div class="codex-head"><h2>备份管理</h2></div>
           <ul class="backups-list" id="backupsList"></ul>
